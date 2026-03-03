@@ -1,2 +1,6 @@
 pandas
 numpy
+scikit-learn
+tensorflow
+tensorflow-model-optimization
+matplotlib
