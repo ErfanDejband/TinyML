@@ -2,5 +2,6 @@ pandas
 numpy
 scikit-learn
 tensorflow
+tf_keras
 tensorflow-model-optimization
 matplotlib
