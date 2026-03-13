@@ -16,3 +16,6 @@ RowCSVData/
 # IDE
 .vscode/
 .idea/
+
+# GitHub
+.github/
