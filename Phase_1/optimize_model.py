@@ -18,7 +18,7 @@ def optimize_and_convert_model(
     model: keras.Model,
     X_train: np.ndarray,
     y_train: np.ndarray,
-    total_training_steps,
+    total_training_steps: int|None = None,
     pruning_params: Dict[str, Any] = None,
     quantize: bool = True,
     optimizer: str = 'adam',
@@ -40,11 +40,18 @@ def optimize_and_convert_model(
         bytes: The converted and optimized TFLite model as a byte array.
     """
     # --- 1. Pruning ---
-    end_step = (total_training_steps*0.9) if total_training_steps < len(X_train) * 0.8 else int(len(X_train) * 0.8)
+    if total_training_steps is not None and total_training_steps < len(X_train) * 0.8:
+        end_step = int(total_training_steps*0.9) 
+    else:
+        end_step = int(len(X_train) * 0.8)
     if pruning_params is None:
         pruning_params = {
-            'pruning_schedule': tfmot.sparsity.keras.ConstantSparsity(
-                target_sparsity=0.5, begin_step=0, end_step=end_step, frequency=100
+            'pruning_schedule': tfmot.sparsity.keras.PolynomialDecay(
+                initial_sparsity=0.0,   # Start with 0% pruning
+                final_sparsity=0.5,     # End with 50% pruning
+                begin_step=0,
+                end_step=end_step,
+                power=3                 # Controls the curve shape
             )
         }
 

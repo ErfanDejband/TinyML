@@ -32,6 +32,40 @@
 | `Phase_1_TinyML_Foundations.md` | Comprehensive Phase 1 learning material (math, diagrams, theory) |
 | `PROJECT_CONTEXT.md` | This file — shared context for all chat sessions |
 
+## Folder Structure
+```
+TinyML/
+├── PROJECT_CONTEXT.md              ← You are here
+├── .github/
+│   └── prompts/
+│       ├── code-helper.prompt.md
+│       ├── deep-explainer.prompt.md
+│       └── roadmap-manager.prompt.md
+├── Phase_1/                        ← ✅ COMPLETE
+│   ├── Phase_1_TinyML_Foundations.md
+│   ├── TinyML.ipynb
+│   ├── process_data.py
+│   ├── prepare_data_for_training.py
+│   ├── create_model.py
+│   ├── optimize_model.py
+│   ├── RowData/
+│   └── models/
+│       ├── my_model.h5
+│       └── magic_wand_model.tflite
+├── Phase_2/                        ← 🔄 IN PROGRESS
+│   └── Phase_2_From_Model_to_C.md
+├── Phase_3/                        ← 🔜 Future
+└── Phase_4/                        ← 🔜 Future
+```
+
+## Current Status
+| Phase | Description | Status |
+|-------|------------|--------|
+| Phase 1 | TinyML Foundations (Data, CNN, Pruning, Quantization) | ✅ Complete |
+| Phase 2 | From Model to C (xxd, hex, FlatBuffers, `.h` header) | 🔄 Starting |
+| Phase 3 | Embedded C/C++ (TFLite Micro, Tensor Arena) | 🔜 Not started |
+| Phase 4 | Hardware Implementation (real-time on device) | 🔜 Not started |
+
 ## My Model Specs
 - **Input shape:** (50, 3) — 50 timesteps, 3 axes (x, y, z)
 - **Architecture:** Conv1D(8, kernel=3) → MaxPooling1D(2) → Flatten → Dense(16) → Dense(2, softmax)
