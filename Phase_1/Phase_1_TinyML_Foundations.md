@@ -29,10 +29,10 @@ TinyML = **Machine Learning on microcontrollers** (devices with kilobytes of RAM
 ```
 Traditional ML:                          TinyML:
 ┌─────────────┐                         ┌─────────────┐
-│  GPU Server  │                         │  Arduino     │
-│  16 GB RAM   │                         │  256 KB RAM  │
-│  200W power  │                         │  0.1W power  │
-│  Cloud-based │                         │  On-device   │
+│  GPU Server │                         │  Arduino    │
+│  16 GB RAM  │                         │  256 KB RAM │
+│  200W power │                         │  0.1W power │
+│  Cloud-based│                         │  On-device  │
 └─────────────┘                         └─────────────┘
    Model: 500 MB                           Model: 5 KB
    Latency: 100ms + network               Latency: 10ms
@@ -102,13 +102,13 @@ A single accelerometer reading `(0.0, 0.2, 9.7)` tells you **nothing** about mot
 ### The Solution: Stack Readings Into Windows
 ```
 Raw data (point by point):          Windowed data (grouped):
-┌─────────────────────┐             ┌─────────────────────────────┐
+┌───────────────────────┐          ┌──────────────────────────────┐
 │ t=0.00: 0.0, 0.2, 9.7 │          │ Window 1: rows 0-49  (1 sec) │ → Label: "Idle"
 │ t=0.02: 0.1, 0.3, 9.8 │          │ Window 2: rows 25-74 (1 sec) │ → Label: "Idle"
 │ t=0.04: 0.0, 0.2, 9.7 │          │ Window 3: rows 50-99 (1 sec) │ → Label: "Wave"
-│ ...                    │          │ ...                           │
-│ t=20.0: 0.5, 0.1, 9.6 │          │ Window N: last 50 rows        │ → Label: "Wave"
-└─────────────────────┘             └─────────────────────────────┘
+│ ...                   │          │ ...                          │
+│ t=20.0: 0.5, 0.1, 9.6 │          │ Window N: last 50 rows       │ → Label: "Wave"
+└───────────────────────┘          └──────────────────────────────┘
   Shape: (1000, 3)                    Shape: (N, 50, 3)
   One number per row                  One MATRIX per sample
 ```
@@ -301,7 +301,7 @@ Step 2: Callback fires:
 
 ### Pruning Schedules — Two Options
 
-#### Option A: `ConstantSparsity` (What you used)
+#### Option A: `ConstantSparsity` 
 ```python
 tfmot.sparsity.keras.ConstantSparsity(
     target_sparsity=0.5,   # Target: 50% of weights = 0
@@ -325,7 +325,7 @@ Sparsity
 
 **When to use**: Simple projects, small models, when you don't need gradual ramping.
 
-#### Option B: `PolynomialDecay` (The "gentle" option)
+#### Option B: `PolynomialDecay` (What you used)(The "gentle" option)
 ```python
 tfmot.sparsity.keras.PolynomialDecay(
     initial_sparsity=0.0,   # Start with 0% pruning
@@ -399,13 +399,13 @@ After training with pruning is complete, the model contains:
 `strip_pruning()` does this:
 ```
 Before strip:                          After strip:
-┌────────────────────────────┐        ┌──────────────────┐
-│ prune_low_magnitude_conv1d │        │ conv1d           │
-│ ├── weights: [0.9, 0, 0.7]│   →    │ weights: [0.9, 0, 0.7]
-│ ├── mask:    [1,   0,  1 ]│        │                  │
-│ └── schedule: {...}        │        │ (no mask)        │
-└────────────────────────────┘        └──────────────────┘
-     Heavy (~2x model size)              Light (standard model)
+┌────────────────────────────┐        ┌────────────────────────┐
+│ prune_low_magnitude_conv1d │        │ conv1d                 │
+│ ├── weights: [0.9, 0, 0.7] │   →    │ weights: [0.9, 0, 0.7] │
+│ ├── mask:    [1,   0,  1 ] │        │                        │
+│ └── schedule: {...}        │        │ (no mask)              │
+└────────────────────────────┘        └────────────────────────┘
+    Heavy (~2x model size)              Light (standard model)
 ```
 
 The zeros are now **permanently baked** into the weights. The model is a standard Keras model again — but 50% of its weights are exactly `0.0`.
@@ -665,17 +665,17 @@ A `.tflite` file is a **FlatBuffer** — a binary format designed for:
 │ Operator list                │  ← Conv1D, Dense, etc.
 ├──────────────────────────────┤
 │ Tensor 1: Conv1D weights     │  ← int8 values
-│ Tensor 1: S=0.005, Z=-30    │  ← Quantization params
+│ Tensor 1: S=0.005, Z=-30     │  ← Quantization params
 ├──────────────────────────────┤
 │ Tensor 2: Dense weights      │  ← int8 values
-│ Tensor 2: S=0.031, Z=-64    │  ← Quantization params
+│ Tensor 2: S=0.031, Z=-64     │  ← Quantization params
 ├──────────────────────────────┤
 │ ...                          │
 └──────────────────────────────┘
 ```
 
 ### From .tflite to C Header (.h)
-The final step of Phase 1 is converting the binary `.tflite` into a C array:
+The next step is Phase 2 ─ converting the binary `.tflite` into a C array:
 
 **Command:**
 ```bash
