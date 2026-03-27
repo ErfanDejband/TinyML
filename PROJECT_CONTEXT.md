@@ -62,7 +62,7 @@ TinyML/
 | Phase | Description | Status |
 |-------|------------|--------|
 | Phase 1 | TinyML Foundations (Data, CNN, Pruning, Quantization) | ✅ Complete |
-| Phase 2 | From Model to C (xxd, hex, FlatBuffers, `.h` header) | 🔄 Starting |
+| Phase 2 | From Model to C (xxd, hex, FlatBuffers, `.h` header) | 🔄 Step 2 done (xxd conversion), Steps 3-6 remaining |
 | Phase 3 | Embedded C/C++ (TFLite Micro, Tensor Arena) | 🔜 Not started |
 | Phase 4 | Hardware Implementation (real-time on device) | 🔜 Not started |
 
