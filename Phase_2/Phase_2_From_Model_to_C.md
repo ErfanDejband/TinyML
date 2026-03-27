@@ -505,6 +505,106 @@ When you write `#include "model_data.h"` in a `.c` file, the compiler literally 
 
 > **Analogy:** The `.h` file is a **business card** — it tells others WHERE to find the data. The `.c` file is the **actual office** where the data lives. You hand out many business cards, but there's only one office.
 
+### 2.7.1 💡 Wait — Why Does the `.c` File Include Its Own `.h` File?
+
+You might have noticed something strange in the `.c` file:
+
+```c
+// magic_wand_model_data.c
+#include "magic_wand_model_data.h"   // ← Why is it including its OWN header?!
+#include <stdalign.h>
+
+alignas(16) const unsigned char magic_wand_model_data[] = { ... };
+const unsigned int magic_wand_model_data_len = 3202;
+```
+
+This feels circular! The `.c` file **defines** the array, and the `.h` file **declares** the array. So why does the `.c` file need to see the `.h` file? Great question!
+
+#### The Answer: Type Checking and Consistency
+
+**Short version:** The `.c` file includes its `.h` to let the compiler **verify that your promise matches your delivery**.
+
+Think about it this way:
+
+```
+┌── model_data.h (The Promise) ───────────────────────────────────┐
+│ extern const unsigned char magic_wand_model_data[];             │
+│        "I promise this exists as a CONST UNSIGNED CHAR array"   │
+└──────────────────────────────────────────────────────────────────┘
+
+┌── model_data.c (The Delivery) ──────────────────────────────────┐
+│ #include "magic_wand_model_data.h"   ← "Let me check the promise"│
+│                                                                  │
+│ alignas(16) const unsigned char magic_wand_model_data[] = {...};│
+│             "I'm delivering a CONST UNSIGNED CHAR array" ✅      │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+When `model_data.c` includes `model_data.h`, the compiler can **cross-check** that:
+1. The **type** matches (both say `const unsigned char`)
+2. The **name** matches (both say `magic_wand_model_data`)
+3. The **qualifiers** match (both say `const`, both use `alignas(16)`)
+
+#### What Happens If You DON'T Include It?
+
+Let's say you make a typo in the `.c` file:
+
+```c
+// ❌ model_data.c (WITHOUT including the .h)
+// No #include "model_data.h"
+
+alignas(16) unsigned char magic_wand_model_data[] = { ... };  
+//            ^^^^^^^ OOPS! Forgot 'const'
+```
+
+**Without the `#include`:** The compiler has no idea you made a mistake. It compiles just fine. But now:
+- The `.h` file promises: `const unsigned char` (lives in Flash)
+- The `.c` file delivers: `unsigned char` (lives in RAM!)
+- **Linker error!** Or worse, undefined behavior at runtime.
+
+**With the `#include`:** The compiler sees both declarations in the same file and immediately catches the mismatch:
+
+```
+ERROR: conflicting types for 'magic_wand_model_data'
+  .h says: const unsigned char magic_wand_model_data[]
+  .c says:       unsigned char magic_wand_model_data[]
+```
+
+Compilation fails immediately. You fix the typo in 10 seconds instead of debugging for hours.
+
+#### It's Not Required in C — But It's Best Practice
+
+Technically, C doesn't **force** you to include the `.h` in the `.c`. The code will compile as long as other files don't see the mismatch. But **you will eventually make a mistake** — a typo, a wrong type, a missing `const`. Including the `.h` is like having a **spell-checker for your code**.
+
+> **Analogy:** It's like signing a contract.  
+> - The `.h` file is the contract: "I promise to deliver X."  
+> - The `.c` file is the delivery: "Here's X."  
+> - Including the `.h` in the `.c` means you're **checking your delivery against the contract** before shipping it.
+
+#### What About `<stdalign.h>`?
+
+You also see:
+
+```c
+#include <stdalign.h>
+```
+
+This is different — it's a **standard C library header** (angle brackets `< >` mean "system library"). It provides the `alignas(16)` keyword, which tells the compiler: "Start this array at a memory address that's a multiple of 16."
+
+Why 16? Many CPUs (including ARM Cortex-M) can read data **faster** if it's aligned to 16-byte boundaries. TFLite Micro expects this alignment, so we include `<stdalign.h>` to use the keyword.
+
+> **Python comparison:** It's like `from typing import List` — you need to import something before you can use it. C is the same, just more explicit.
+
+#### Summary
+
+| File | Why It Includes What |
+|------|----------------------|
+| `model_data.c` includes `"model_data.h"` | ✅ Self-check: "Does my definition match my declaration?" |
+| `model_data.c` includes `<stdalign.h>` | ✅ Provides the `alignas()` keyword |
+| `main.c` includes `"model_data.h"` | ✅ Uses the model: "Where can I find `magic_wand_model_data`?" |
+
+**The rule:** Every `.c` file should include its own `.h` file (if it has one). It's free error-checking.
+
 ### 2.8 The Bash Script Explained
 
 Your `convert_tflite_to_c.sh` is just 5 lines of real code. Here's what each part does:
@@ -1817,3 +1917,938 @@ TFLite stores it as a **RESHAPE operator** with input shape `[1,24,1,8]` and out
 ---
 
 > 📝 **Next:** Section 5 — The C Header: Reading your model as code. How the `.h` and `.c` files work together, and what TFLite Micro expects to find.
+
+---
+
+## 5. The C Header — Reading Your Model as Code <a name="5-the-c-header"></a>
+
+### 5.1 The Problem: No Filesystem on a Microcontroller
+
+You've learned how TFLite stores your model in a binary FlatBuffer format. Now you need to **run** it on a microcontroller. But there's a fundamental problem:
+
+**In Python, you load models from files:**
+```python
+interpreter = tf.lite.Interpreter("magic_wand_model.tflite")
+```
+
+**But on a microcontroller:**
+```
+❌ No hard drive
+❌ No SD card slot (on most chips)
+❌ No filesystem API (no fopen, no read, no FILE*)
+❌ No operating system
+
+✅ Only 256 KB Flash ROM (read-only storage)
+✅ Only 8 KB RAM (working memory)
+```
+
+> **Analogy:** Your computer is like a library with thousands of books (files) you can check out anytime. A microcontroller is like a single textbook — everything you need must be **printed inside the book itself** before it ships.
+
+**The solution?** Convert your `.tflite` file into a **C array** that gets compiled directly into the chip's Flash ROM.
+
+---
+
+### 5.2 From `.tflite` to `.h` — The xxd Tool
+
+You already learned about `xxd` in Section 2. Now you'll see **why** we need it:
+
+**Step 1: Run xxd**
+```bash
+xxd -i magic_wand_model.tflite > model.h
+```
+
+**Step 2: Look at the result**
+```c
+// model.h
+unsigned char magic_wand_model_tflite[] = {
+  0x1c, 0x00, 0x00, 0x00, 0x54, 0x46, 0x4c, 0x33, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x0e, 0x00, 0x18, 0x00, 0x04, 0x00, 0x08, 0x00, 0x0c, 0x00,
+  // ... 3,200+ more bytes ...
+  0x00, 0x00, 0x00, 0x00
+};
+unsigned int magic_wand_model_tflite_len = 3264;
+```
+
+**What just happened?**
+- Your entire `.tflite` file (3,264 bytes) became a **C array**
+- Each byte is written as hexadecimal: `0x1c`, `0x00`, etc.
+- The compiler will embed this array directly into Flash ROM
+
+---
+
+### 5.3 Anatomy of a C Header File
+
+Let's break down what `xxd` created:
+
+```c
+unsigned char magic_wand_model_tflite[] = { ... };
+```
+
+| Part | Meaning | Python Equivalent |
+|------|---------|-------------------|
+| `unsigned char` | An 8-bit value (0–255) | `int` in range 0-255 or `bytes` |
+| `[]` | An array (contiguous memory block) | `list` or `bytes` |
+| `= { 0x1c, ... }` | Initialize with these values | `data = bytes([0x1C, ...])` |
+
+```c
+unsigned int magic_wand_model_tflite_len = 3264;
+```
+
+| Part | Meaning | Python Equivalent |
+|------|---------|-------------------|
+| `unsigned int` | A 32-bit integer (0–4,294,967,295) | `int` |
+| `= 3264` | The array length in bytes | `len(data)` |
+
+---
+
+### 5.4 Why `unsigned char` and Not `int8_t`?
+
+You might wonder: "The model is quantized to int8. Why use `unsigned char`?"
+
+**Answer:** `unsigned char` and `uint8_t` are **identical** (both are 8-bit unsigned integers). But:
+
+| Type | Range | Use Case |
+|------|-------|----------|
+| `unsigned char` | 0–255 | **Raw bytes** (no interpretation) |
+| `uint8_t` | 0–255 | Explicit "8-bit unsigned integer" |
+| `int8_t` | -128 to +127 | **Signed** quantized values |
+
+When storing the **raw FlatBuffer binary**, we use `unsigned char` because we're just holding bytes. The **weights inside** those bytes are `int8_t` (signed), but the **file itself** doesn't care about signs — it's just a blob of data.
+
+> **Analogy:** Think of a ZIP file. The file itself is just bytes (unsigned char). But inside the ZIP, you might have images, text files, or executable programs. The ZIP format doesn't care — it just stores bytes.
+
+---
+
+### 5.5 Where Does This Array Live? Flash vs RAM
+
+This is **critical** for embedded systems. Let's compare:
+
+```c
+// Version 1: Default (on some systems, lives in RAM)
+unsigned char model[] = { 0x1c, 0x00, ... };
+
+// Version 2: Force it into Flash ROM
+const unsigned char model[] = { 0x1c, 0x00, ... };
+```
+
+**What does `const` do?**
+
+| Without `const` | With `const` |
+|----------------|--------------|
+| May be placed in RAM | **Always in Flash ROM** |
+| Uses precious working memory | Frees up RAM for tensor arena |
+| Can be modified (dangerous!) | Read-only (safe) |
+
+**Your microcontroller's memory map:**
+```
+┌─────────────────────────────────────┐
+│  Flash ROM (256 KB)                 │  ← Read-only, non-volatile
+│  ┌───────────────────────────────┐  │
+│  │ Your Arduino sketch code       │  │
+│  │ TFLite Micro library           │  │
+│  │ const model[] = { 0x1c, ... }  │  ← MODEL LIVES HERE (3 KB)
+│  └───────────────────────────────┘  │
+└─────────────────────────────────────┘
+
+┌─────────────────────────────────────┐
+│  RAM (8 KB)                         │  ← Volatile, fast
+│  ┌───────────────────────────────┐  │
+│  │ Stack (local variables)        │  │
+│  │ tensor_arena[] (working mem)   │  ← INFERENCE HAPPENS HERE (5 KB)
+│  │ Interpreter state              │  │
+│  └───────────────────────────────┘  │
+└─────────────────────────────────────┘
+```
+
+**Math check for YOUR model:**
+- Flash used by model: **3,264 bytes** (out of 256 KB = 262,144 bytes) → **1.2% used**
+- RAM available for tensor arena: **8,192 bytes** (full RAM, since model is in Flash)
+- Estimated RAM needed: ~5,000 bytes → **Fits comfortably!**
+
+> **Python analogy:**
+> ```python
+> # In Python, this loads the file into RAM:
+> model_data = open("model.tflite", "rb").read()  # Uses 3 KB of RAM
+> 
+> # In C with const, this stays in Flash:
+> const uint8_t model_data[] = { ... };  # Uses 0 KB of RAM!
+> ```
+
+---
+
+### 5.6 Improving the Header — Best Practices
+
+The raw `xxd` output is functional but not optimal. Here's how professionals structure it:
+
+**Version 1: Raw xxd output (functional but messy)**
+```c
+unsigned char magic_wand_model_tflite[] = { 0x1c, 0x00, ... };
+unsigned int magic_wand_model_tflite_len = 3264;
+```
+
+**Version 2: Professional style (better)**
+```c
+// model.h
+#ifndef MODEL_H
+#define MODEL_H
+
+#include <stdint.h>  // For uint8_t, uint32_t
+
+// Model data (stored in Flash ROM)
+extern const uint8_t g_model_data[];
+extern const uint32_t g_model_data_len;
+
+#endif  // MODEL_H
+```
+
+```c
+// model.c
+#include "model.h"
+
+// Align to 4-byte boundary for faster access on ARM Cortex-M
+alignas(4) const uint8_t g_model_data[] = {
+  0x1c, 0x00, 0x00, 0x00, 0x54, 0x46, 0x4c, 0x33,
+  // ... rest of data ...
+};
+
+const uint32_t g_model_data_len = 3264;
+```
+
+**Why split `.h` and `.c`?**
+
+| File | Purpose | Python Equivalent |
+|------|---------|-------------------|
+| `model.h` | **Declarations** (what exists) | `from model import model_data` |
+| `model.c` | **Definitions** (the actual data) | `model_data = bytes([...])` |
+
+This lets you `#include "model.h"` in multiple files without duplicating 3,264 bytes each time.
+
+**Why `alignas(4)`?**
+
+ARM Cortex-M processors (used in Arduino, ESP32, etc.) read memory in 4-byte chunks. If your array starts at address 0x2001 (not divisible by 4), the CPU needs **two reads instead of one**:
+
+```
+Unaligned (slower):
+Address: 0x2001 0x2002 0x2003 0x2004 0x2005
+         [  0x1c      ] [  0x00      ]
+         ↑ Read 1       ↑ Read 2
+
+Aligned (faster):
+Address: 0x2000 0x2001 0x2002 0x2003 0x2004
+         [  padding | 0x1c | 0x00 | 0x00  ]
+         ↑ Single read
+```
+
+`alignas(4)` tells the compiler: "Start this array at an address divisible by 4."
+
+---
+
+### 5.7 What TFLite Micro Expects
+
+Now that you have `model.h`, how does TFLite Micro use it? Here's the minimal setup:
+
+```c
+#include "model.h"
+#include "tensorflow/lite/micro/micro_interpreter.h"
+#include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
+
+// 1. Point to your model (in Flash)
+const uint8_t* model = g_model_data;
+
+// 2. Allocate working memory (in RAM)
+constexpr int kTensorArenaSize = 8 * 1024;  // 8 KB
+uint8_t tensor_arena[kTensorArenaSize];
+
+// 3. Tell TFLite which operations your model uses
+tflite::MicroMutableOpResolver<3> micro_op_resolver;
+micro_op_resolver.AddConv2D();
+micro_op_resolver.AddMaxPool2D();
+micro_op_resolver.AddFullyConnected();
+
+// 4. Create interpreter
+tflite::MicroInterpreter interpreter(
+    tflite::GetModel(model),    // Parse the FlatBuffer
+    micro_op_resolver,          // Which ops are available
+    tensor_arena,               // Working memory
+    kTensorArenaSize
+);
+
+// 5. Allocate tensors (sets up input/output pointers)
+interpreter.AllocateTensors();
+
+// 6. Get input tensor
+TfLiteTensor* input = interpreter.input(0);
+// input->data.int8 now points to a buffer of size [1, 50, 3]
+
+// 7. Fill input with your sensor data
+for (int i = 0; i < 50; i++) {
+    input->data.int8[i * 3 + 0] = quantized_x[i];
+    input->data.int8[i * 3 + 1] = quantized_y[i];
+    input->data.int8[i * 3 + 2] = quantized_z[i];
+}
+
+// 8. Run inference
+interpreter.Invoke();
+
+// 9. Read output
+TfLiteTensor* output = interpreter.output(0);
+int8_t wave_score = output->data.int8[0];
+int8_t idle_score = output->data.int8[1];
+```
+
+**Breaking it down:**
+
+#### Line-by-line comparison to Python:
+
+| C | Python Equivalent |
+|---|-------------------|
+| `const uint8_t* model = g_model_data;` | `model_path = "model.tflite"` |
+| `uint8_t tensor_arena[8192];` | Happens automatically (managed by OS) |
+| `AddConv2D()` | Not needed (Python loads all ops) |
+| `MicroInterpreter interpreter(...)` | `interpreter = tf.lite.Interpreter(model_path)` |
+| `AllocateTensors()` | `interpreter.allocate_tensors()` |
+| `input->data.int8[i]` | `interpreter.get_input_details()[0]['index']` |
+| `Invoke()` | `interpreter.invoke()` |
+| `output->data.int8[0]` | `interpreter.get_output_details()[0]['index']` |
+
+---
+
+### 5.8 The Tensor Arena — Your Inference Workspace
+
+The **tensor arena** is where all intermediate calculations happen:
+
+```
+Your model: Input(50,3) → Conv1D(8) → MaxPool → Flatten → Dense(16) → Dense(2)
+
+During inference, TFLite needs memory for:
+┌─────────────────────────────────────────────┐
+│ tensor_arena[8192 bytes]                    │
+│ ┌─────────────────────────────────────────┐ │
+│ │ Input tensor: 50×3 = 150 bytes          │ │
+│ │ Conv1D output: 48×8 = 384 bytes         │ │
+│ │ MaxPool output: 24×8 = 192 bytes        │ │
+│ │ Flatten output: 192 bytes (reuses pool) │ │
+│ │ Dense(16) output: 16 bytes              │ │
+│ │ Dense(2) output: 2 bytes                │ │
+│ │ Scratch buffers for operations: ~500 B  │ │
+│ └─────────────────────────────────────────┘ │
+│ Total used: ~1,244 bytes (15% of 8 KB)     │
+└─────────────────────────────────────────────┘
+```
+
+**How does TFLite know how much to allocate?**
+
+1. It reads your model's FlatBuffer (from Flash)
+2. It sees: "This model has 5 layers, here are their shapes"
+3. It does the math: 150 + 384 + 192 + ... = ~1,244 bytes
+4. If it's MORE than `kTensorArenaSize`, `AllocateTensors()` **fails**
+
+> **Analogy:** The tensor arena is like a **whiteboard**. Each layer writes its output on the board, then the next layer reads it and writes its own output. TFLite reuses space when possible (e.g., Flatten doesn't need new memory — it just reinterprets the MaxPool output).
+
+---
+
+### 5.9 Worked Example: Memory Budget for YOUR Model
+
+Let's calculate if your model fits:
+
+**Your model specs (from PROJECT_CONTEXT.md):**
+- Input: (50, 3) int8
+- Conv1D(8, kernel=3)
+- MaxPooling1D(2)
+- Flatten
+- Dense(16)
+- Dense(2)
+
+**Memory calculations:**
+
+| Layer | Output Shape | Bytes (int8) | Notes |
+|-------|--------------|--------------|-------|
+| Input | (50, 3) | 150 | User provides this |
+| Conv1D | (48, 8) | 384 | (50 - 3 + 1) × 8 |
+| MaxPool | (24, 8) | 192 | 48 ÷ 2 × 8 |
+| Flatten | (192,) | 0 | **Reuses MaxPool buffer** |
+| Dense(16) | (16,) | 16 | |
+| Dense(2) | (2,) | 2 | |
+| **Subtotal** | | **744 bytes** | |
+| Overhead | | ~500 bytes | Interpreter state, scratch |
+| **Total** | | **~1,244 bytes** | |
+
+**Your budget:** 8,192 bytes  
+**Used:** 1,244 bytes  
+**Remaining:** **6,948 bytes (84% free!)**
+
+✅ **Your model fits comfortably.**
+
+---
+
+### 5.10 Common Mistakes and How to Fix Them
+
+#### Mistake 1: Forgetting `const`
+```c
+uint8_t model_data[] = { ... };  // ❌ Uses 3 KB of RAM!
+const uint8_t model_data[] = { ... };  // ✅ Uses 0 KB of RAM
+```
+
+#### Mistake 2: Tensor arena too small
+```c
+uint8_t tensor_arena[512];  // ❌ Only 512 bytes, model needs 1,244!
+interpreter.AllocateTensors();  // Returns kTfLiteError
+```
+
+**How to fix:** Increase the size until `AllocateTensors()` succeeds:
+```c
+uint8_t tensor_arena[2 * 1024];  // Try 2 KB
+// Still fails? Try 4 KB, 6 KB, 8 KB...
+```
+
+#### Mistake 3: Wrong alignment
+```c
+uint8_t tensor_arena[8192];  // May be unaligned on some systems
+alignas(16) uint8_t tensor_arena[8192];  // ✅ Guaranteed aligned
+```
+
+#### Mistake 4: Model in RAM instead of Flash
+```c
+// main.cpp
+#include "model.h"
+uint8_t* my_model = g_model_data;  // ❌ Creates a COPY in RAM!
+
+// Correct:
+const uint8_t* my_model = g_model_data;  // ✅ Just a pointer (4 bytes)
+```
+
+---
+
+### 5.11 Verification: Did the Conversion Work?
+
+How do you know your C header is correct? **Test it in Python first:**
+
+```python
+import struct
+
+# Read your C header (the xxd output)
+with open("model.h", "r") as f:
+    lines = f.readlines()
+
+# Extract hex values (ugly but works)
+hex_values = []
+for line in lines:
+    if "0x" in line:
+        hex_values.extend(line.split(","))
+
+# Convert to bytes
+model_from_header = bytes([int(h.strip(), 16) for h in hex_values if "0x" in h])
+
+# Read original .tflite
+with open("magic_wand_model.tflite", "rb") as f:
+    original_model = f.read()
+
+# Compare
+if model_from_header == original_model:
+    print("✅ Conversion is correct!")
+else:
+    print("❌ Mismatch detected")
+    print(f"Header size: {len(model_from_header)}")
+    print(f"Original size: {len(original_model)}")
+```
+
+**Alternative: Use TFLite's test tool**
+```python
+import tensorflow as tf
+
+# Load from C array (simulate what TFLite Micro does)
+model_data = bytes([0x1c, 0x00, ...])  # Your C array values
+interpreter = tf.lite.Interpreter(model_content=model_data)
+interpreter.allocate_tensors()
+
+# Run a test inference
+input_details = interpreter.get_input_details()
+interpreter.set_tensor(input_details[0]['index'], test_input)
+interpreter.invoke()
+output = interpreter.get_tensor(interpreter.get_output_details()[0]['index'])
+
+print(f"Output: {output}")  # Should match your Python training results
+```
+
+---
+
+### 5.12 Summary — What You've Learned
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     From .tflite to C                       │
+└─────────────────────────────────────────────────────────────┘
+
+1. Microcontrollers have NO filesystem
+   → Can't use fopen("model.tflite")
+
+2. Solution: Convert to C array with xxd
+   → xxd -i model.tflite > model.h
+
+3. Use `const` to store in Flash (not RAM)
+   → const uint8_t model[] = { ... };
+
+4. TFLite Micro needs:
+   → Model pointer (Flash)
+   → Tensor arena (RAM)
+   → Op resolver (which layers are supported)
+
+5. Memory budget:
+   → Your model: ~1,244 bytes in RAM
+   → Your budget: 8,192 bytes
+   → Fits easily ✅
+
+6. Best practices:
+   → Split .h (declarations) and .c (data)
+   → Use alignas(4) for faster access
+   → Verify with Python before deploying
+```
+
+---
+
+### 5.13 Quick Check
+
+Before moving to Section 6, test your understanding:
+
+**Question 1:** Why do we use `const` in front of the model array?
+
+<details>
+<summary>Click for answer</summary>
+
+**`const` forces the array into Flash ROM instead of RAM.** Without it, the 3 KB model would consume precious RAM that we need for the tensor arena. With `const`, the model stays in read-only Flash and uses 0 bytes of RAM (except for a 4-byte pointer to it).
+
+</details>
+
+**Question 2:** Your model needs 2,000 bytes for the tensor arena, but you only have 1,500 bytes of RAM. What can you do?
+
+<details>
+<summary>Click for answer</summary>
+
+Three options:
+1. **Get a chip with more RAM** (e.g., upgrade from 8 KB to 16 KB)
+2. **Reduce model size** (fewer filters, smaller Dense layers)
+3. **Use a smaller tensor arena** by removing other variables from RAM (but you can't go below the 2,000 bytes the model needs)
+
+The model's RAM requirement is **non-negotiable** — if it needs 2,000 bytes, it needs 2,000 bytes.
+
+</details>
+
+**Question 3:** What's the difference between `model_data` (in Flash) and `tensor_arena` (in RAM)?
+
+<details>
+<summary>Click for answer</summary>
+
+| Aspect | `model_data` (Flash) | `tensor_arena` (RAM) |
+|--------|----------------------|----------------------|
+| **Stores** | Weights, biases, model structure | Activations during inference |
+| **Speed** | Slower read access (~100 ns) | Faster read/write (~10 ns) |
+| **Persistence** | Survives power loss | Erased when power off |
+| **Size** | 256 KB typical | 8 KB typical |
+| **Use case** | "The recipe" | "The kitchen workspace" |
+
+**Analogy:** Flash is like a cookbook (permanent instructions). RAM is like the kitchen counter (temporary workspace while you cook).
+
+</details>
+
+---
+
+> 📝 **Next:** Section 6 — Verification: Running your first inference in C and comparing output to Python.
+
+---
+
+## 6. Verification — Is My Conversion Correct? <a name="6-verification"></a>
+
+### 6.1 Why Verification Matters
+
+You've just converted your trained, pruned, quantized model from a `.tflite` binary file into a C header file. That's several transformations:
+
+```
+Python model (.h5)
+    ↓ TFLite converter
+.tflite binary (FlatBuffer format)
+    ↓ xxd -i
+C array of hex bytes
+    ↓ manual edits (const, alignas, renaming)
+Final C header (.h) + source (.c)
+```
+
+**At ANY of these steps, something could go wrong:**
+- Corrupted file during conversion
+- Copy-paste error when editing
+- Wrong endianness interpretation
+- Typo in the hex values
+- Mismatched file sizes
+
+> **Analogy:** You're translating a recipe from French → English → Spanish. At each step, you could introduce errors. Before you cook the dish, you want to **verify each translation matches the original meaning**.
+
+**The goal of verification:** Prove that your C array contains the **exact same bytes** as your original `.tflite` file, and that it produces the **exact same inference results** as the Python version.
+
+---
+
+### 6.2 Verification Level 1: Byte-for-Byte Comparison
+
+The simplest check: Do the bytes match?
+
+#### Method 1: Manual byte count
+
+```bash
+# Check original .tflite file size
+ls -l magic_wand_model.tflite
+# Output: 7848 bytes
+
+# Check the length variable in your C file
+grep "_len" magic_wand_model_data.c
+# Output: const unsigned int magic_wand_model_data_len = 7848;
+```
+
+✅ **If the numbers match**, you've passed the first test.  
+❌ **If they DON'T match**, something went wrong during `xxd` conversion or editing.
+
+#### Method 2: Python comparison script
+
+This is more thorough — it checks **every single byte**:
+
+**Expected output:**
+```
+Original .tflite size: 7848 bytes
+C array size: 7848 bytes
+✅ SUCCESS: C array matches .tflite file perfectly!
+   Conversion is correct. Safe to use in embedded code.
+```
+
+> **What this tells you:** Your `xxd` conversion was successful and your manual edits (adding `const`, `alignas`, etc.) didn't corrupt the actual hex data.
+
+---
+
+### 6.3 Verification Level 2: FlatBuffer Header Check
+
+Even if the bytes match, let's verify the **FlatBuffer structure** is intact:
+
+**Expected output:**
+```
+✅ FlatBuffer magic bytes correct: b'TFL3'
+✅ Root table offset: 28 (bytes from end)
+   Root table position in file: byte 7820
+```
+
+> **What this tells you:** The FlatBuffer structure wasn't corrupted. TFLite Micro will be able to **parse** your model.
+
+---
+
+### 6.4 Verification Level 3: Inference Comparison (Python vs C)
+
+This is the **ultimate test**: Run inference on the **same input** in both Python and C, then compare outputs.
+
+#### Step 1: Save test input and expected output (Python)
+
+```python
+# generate_test_data.py
+import numpy as np
+import tensorflow as tf
+
+# Load your TFLite model
+interpreter = tf.lite.Interpreter(model_path="../models/magic_wand_model.tflite")
+interpreter.allocate_tensors()
+
+# Get input/output details
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
+print(f"Input shape: {input_details[0]['shape']}")
+print(f"Input dtype: {input_details[0]['dtype']}")
+print(f"Output shape: {output_details[0]['shape']}")
+print(f"Output dtype: {output_details[0]['dtype']}")
+
+# Create a test input (50 timesteps × 3 axes)
+# Use a simple pattern so we can recreate it in C
+test_input = np.zeros((1, 50, 3), dtype=np.int8)
+for i in range(50):
+    test_input[0, i, 0] = (i % 128) - 64      # x-axis: -64 to +63
+    test_input[0, i, 1] = ((i * 2) % 128) - 64  # y-axis: different pattern
+    test_input[0, i, 2] = ((i * 3) % 128) - 64  # z-axis: different pattern
+
+# Run inference
+interpreter.set_tensor(input_details[0]['index'], test_input)
+interpreter.invoke()
+output = interpreter.get_tensor(output_details[0]['index'])
+
+print(f"\n✅ Test input created (shape: {test_input.shape})")
+print(f"✅ Python inference output: {output[0]}")
+print(f"   Class 0 (Wave): {output[0][0]}")
+print(f"   Class 1 (Idle): {output[0][1]}")
+
+# Save for C comparison
+np.save("test_input.npy", test_input)
+np.save("expected_output.npy", output)
+print(f"\n📁 Saved test_input.npy and expected_output.npy")
+```
+
+**Run it:**
+```bash
+python generate_test_data.py
+```
+
+**Example output:**
+```
+Input shape: [1, 50, 3]
+Input dtype: <class 'numpy.int8'>
+Output shape: [1, 2]
+Output dtype: <class 'numpy.int8'>
+
+✅ Test input created (shape: (1, 50, 3))
+✅ Python inference output: [[-95  82]]
+   Class 0 (Wave): -95
+   Class 1 (Idle): 82
+
+📁 Saved test_input.npy and expected_output.npy
+```
+
+> **What these numbers mean:** Remember from Phase 1 — these are **quantized int8 outputs**. The higher value wins. Here, `82 > -95`, so the model predicts **Class 1 (Idle)**.
+
+#### Step 2: Run the same test in C (Phase 3 topic, preview here)
+
+In Phase 3, you'll write C++ code that does this:
+
+```cpp
+// inference_test.cpp (simplified — full version in Phase 3)
+#include "magic_wand_model_data.h"
+#include "tensorflow/lite/micro/micro_interpreter.h"
+
+// Test input (same pattern as Python)
+int8_t test_input[50][3];
+for (int i = 0; i < 50; i++) {
+    test_input[i][0] = (i % 128) - 64;
+    test_input[i][1] = ((i * 2) % 128) - 64;
+    test_input[i][2] = ((i * 3) % 128) - 64;
+}
+
+// Run inference (details in Phase 3)
+// ...
+
+// Compare output
+int8_t output_wave = output_tensor->data.int8[0];
+int8_t output_idle = output_tensor->data.int8[1];
+
+printf("C++ inference output: [%d, %d]\n", output_wave, output_idle);
+// Expected: [-95, 82] (same as Python)
+```
+
+**If Python and C outputs match exactly**, you've **verified the entire pipeline** works! 🎉
+
+---
+
+### 6.5 Common Verification Failures and Fixes
+
+#### Failure 1: Byte count mismatch
+
+**Symptom:**
+```
+Original .tflite size: 7848 bytes
+C array size: 7800 bytes
+```
+
+**Cause:** You accidentally deleted some hex values when editing the `.c` file.
+
+**Fix:** Regenerate the C file from scratch using `xxd -i`, then reapply your edits carefully.
+
+---
+
+#### Failure 2: Bytes match, but inference output differs
+
+**Symptom:**
+```python
+Python output: [-95, 82]
+C output: [42, -18]  # Different!
+```
+
+**Possible causes:**
+1. **Wrong input data** — C test input doesn't match Python test input
+2. **Endianness mismatch** — unlikely on modern systems, but possible
+3. **TFLite Micro version mismatch** — different library version than the one used to create `.tflite`
+4. **Tensor arena too small** — `AllocateTensors()` partially succeeded but corrupted memory
+
+**Fix:**
+- Print the input bytes in both Python and C — verify they match exactly
+- Check that `AllocateTensors()` returns `kTfLiteOk` in C
+- Use the same TFLite version in Python and TFLite Micro
+
+---
+
+#### Failure 3: FlatBuffer magic bytes wrong
+
+**Symptom:**
+```
+❌ FlatBuffer magic bytes WRONG!
+   Expected: b'TFL3'
+   Got: b'\x00\x00\x00\x00'
+```
+
+**Cause:** File was corrupted or you accidentally created an empty file.
+
+**Fix:** Re-export the `.tflite` file from Python, then re-run `xxd -i`.
+
+---
+
+### 6.6 Automated Verification Workflow
+
+Here's a complete test script that runs all three verification levels:
+
+```bash
+#!/bin/bash
+# verify_all.sh
+
+echo "========================================="
+echo " TinyML Model Conversion Verification"
+echo "========================================="
+
+echo ""
+echo "[1/3] Byte-for-byte comparison..."
+python verify_conversion.py magic_wand_model_data.c ../models/magic_wand_model.tflite
+if [ $? -ne 0 ]; then
+    echo "❌ FAILED: Byte comparison failed. Stopping."
+    exit 1
+fi
+
+echo ""
+echo "[2/3] FlatBuffer structure check..."
+python verify_flatbuffer.py ../models/magic_wand_model.tflite
+if [ $? -ne 0 ]; then
+    echo "❌ FAILED: FlatBuffer check failed. Stopping."
+    exit 1
+fi
+
+echo ""
+echo "[3/3] Generating test data for inference comparison..."
+python generate_test_data.py
+echo "✅ Test data generated."
+echo "   (You'll compare inference results in Phase 3 when you run C++ code)"
+
+echo ""
+echo "========================================="
+echo " ✅ All verification checks passed!"
+echo "========================================="
+echo "Your C header is ready for embedded deployment."
+```
+
+**Run it:**
+```bash
+chmod +x verify_all.sh
+./verify_all.sh
+```
+
+---
+
+### 6.7 What If Verification Fails?
+
+**If Level 1 (bytes) fails:**
+- Delete the `.c` file
+- Re-run `xxd -i` from scratch
+- Compare file sizes before and after editing
+
+**If Level 2 (FlatBuffer) fails:**
+- Re-export `.tflite` from Python
+- Check that your TensorFlow version supports the model architecture
+- Verify you saved the **quantized** model, not the float model
+
+**If Level 3 (inference) fails:**
+- Print input bytes in both Python and C — ensure they're identical
+- Check `AllocateTensors()` return value
+- Increase tensor arena size
+- Verify you're using compatible TFLite library versions
+
+---
+
+### 6.8 Summary — The Verification Checklist
+
+Before deploying your model to hardware, complete this checklist:
+
+| Check | Tool | Expected Result |
+|-------|------|-----------------|
+| ✅ File sizes match | `ls -l` or Python script | 7,848 bytes in both `.tflite` and C array |
+| ✅ Bytes match exactly | `verify_conversion.py` | "SUCCESS: C array matches .tflite file perfectly!" |
+| ✅ FlatBuffer header intact | `verify_flatbuffer.py` | Magic bytes = `TFL3`, root offset valid |
+| ✅ Python vs C inference | Test script (Phase 3) | Outputs match within ±1 (quantization rounding) |
+| ✅ Tensor arena size OK | C++ `AllocateTensors()` | Returns `kTfLiteOk` |
+| ✅ Model size fits in Flash | Check linker output | Model + code < Flash size (e.g., 256 KB) |
+
+---
+
+### ✅ Quick Check — Test Your Understanding
+
+**Q1:** You run `verify_conversion.py` and get "C array size: 7800 bytes" but the original `.tflite` is 7848 bytes. What happened?
+
+<details>
+<summary>Click for answer</summary>
+
+**You lost 48 bytes during editing.** Most likely:
+- You deleted some hex values by accident when adding `const` or `alignas`
+- Or, the `xxd -i` command failed partway through
+
+**Fix:** Re-run `xxd -i` from scratch, don't edit the hex values themselves — only add `const`, `alignas`, and `#include` statements **around** the array, not inside it.
+
+</details>
+
+**Q2:** Your Python inference outputs `[-95, 82]` but your C inference outputs `[127, 127]`. What's the most likely cause?
+
+<details>
+<summary>Click for answer</summary>
+
+**The tensor arena is too small.** When `AllocateTensors()` fails or partially succeeds, TFLite Micro might write garbage values or default to max int8 (127).
+
+**Fix:** Check the return value of `AllocateTensors()`:
+```cpp
+if (interpreter.AllocateTensors() != kTfLiteOk) {
+    printf("ERROR: Tensor allocation failed!\n");
+}
+```
+
+If it fails, increase `kTensorArenaSize` from (e.g.) 2048 to 4096 to 8192 until it succeeds.
+
+</details>
+
+**Q3:** The FlatBuffer magic bytes are correct (`TFL3`), but when you try to load the model in TFLite Micro, it fails with "Unsupported op." What's wrong?
+
+<details>
+<summary>Click for answer</summary>
+
+**Your model uses an operator that you didn't register** in your `OpResolver`.
+
+For example, if your model uses `CONV_2D`, `MAX_POOL_2D`, `FULLY_CONNECTED`, and `SOFTMAX`, but you only added:
+
+```cpp
+micro_op_resolver.AddConv2D();
+micro_op_resolver.AddMaxPool2D();
+micro_op_resolver.AddFullyConnected();
+// ❌ Forgot AddSoftmax()!
+```
+
+**Fix:** Add the missing operator:
+```cpp
+micro_op_resolver.AddSoftmax();
+```
+
+**How to find which ops you need:** Run the Python TFLite analyzer:
+```python
+interpreter = tf.lite.Interpreter("model.tflite")
+for detail in interpreter.get_tensor_details():
+    print(detail['name'], detail['dtype'])
+```
+
+Or use `xxd` + manual inspection of the operators section in the FlatBuffer (Section 4).
+
+</details>
+
+---
+
+> **🎉 Congratulations!**  
+> You've completed Phase 2. You now understand how a neural network travels from Python to C — from high-level APIs to raw bytes in Flash ROM.
+>
+> **What you mastered:**
+> - Hexadecimal and why it exists
+> - The `xxd` tool and C array conversion
+> - Flash vs RAM and why `const` matters
+> - FlatBuffers and how TFLite stores your model
+> - C headers and how files link together
+> - Verification techniques to catch errors early
+>
+> **Next:** Phase 3 — TFLite Micro inference in C++. You'll write the code that actually **runs** your model on a microcontroller. 🚀
