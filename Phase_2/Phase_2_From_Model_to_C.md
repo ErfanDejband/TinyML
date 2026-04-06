@@ -1855,6 +1855,119 @@ KEY TAKEAWAYS:
 
 ---
 
+### 4.14 FAQ: "Does FlatBuffer Mean 'My Model in C'?"
+
+**Short answer:** YES! The `magic_wand_model_data.c` file you created IS your neural network converted to C bytes.
+
+#### Q1: What is FlatBuffer exactly?
+
+**FlatBuffer** is a **serialization format** — a way to pack complex data (your neural network's layers, weights, shapes, etc.) into raw bytes. Think of it like:
+- **JSON** = human-readable serialization (text)
+- **FlatBuffer** = machine-readable serialization (binary, optimized for speed and zero-copy access)
+
+Your `.tflite` file is a FlatBuffer containing your entire model.
+
+#### Q2: So `magic_wand_model_data.c` IS my model?
+
+**YES!** That C file is literally your trained, pruned, quantized TensorFlow model represented as a byte array:
+
+```c
+const unsigned char magic_wand_model_data[] = {
+  0x1c, 0x00, 0x00, 0x00,  // Root table offset
+  0x54, 0x46, 0x4c, 0x33,  // "TFL3" magic number
+  ... // 7,848 bytes containing:
+      //   - Your Conv1D and Dense weights
+      //   - Biases
+      //   - Layer shapes (50×3 input, etc.)
+      //   - Quantization parameters (scale, zero-point)
+      //   - Operator types (CONV_2D, FULLY_CONNECTED, SOFTMAX)
+};
+```
+
+Every byte you learned to read in this section is RIGHT THERE in that C array.
+
+#### Q3: How will C code know how to READ this network?
+
+**You don't manually decode it** — the **TensorFlow Lite Micro interpreter** does the heavy lifting!
+
+Think of it like this:
+
+| **Python** | **C/C++ Embedded** |
+|------------|-------------------|
+| `model = tf.keras.models.load_model('model.h5')` | `tflite::MicroInterpreter interpreter(model_data, ...)` |
+| TensorFlow reads the `.h5` file format | TFLite Micro reads the FlatBuffer format |
+| Automatically extracts layers, weights, etc. | Automatically extracts layers, weights, etc. |
+
+The TFLite Micro library **knows the FlatBuffer schema** (the "rulebook" for how tables, offsets, and weights are organized). When you pass `magic_wand_model_data` to the interpreter, it:
+
+1. **Checks the magic number** (`TFL3`) to verify it's a valid model
+2. **Reads the root offset** to find the model table
+3. **Follows vtable pointers** to locate subgraphs, tensors, and buffers
+4. **Extracts shapes** (e.g., "Input tensor is 50×3")
+5. **Loads weights** directly from Flash (zero-copy!)
+6. **Reads quantization params** (scale, zero-point for each layer)
+7. **Sets up the computational graph** (Conv1D → Dense → Softmax)
+
+**You don't write any of this parsing code** — TFLite Micro's C++ library handles it all.
+
+#### Q4: When will I learn to USE this in C code?
+
+**Phase 3!** You'll write C++ code that looks like this:
+
+```cpp
+#include "magic_wand_model_data.h"
+#include "tensorflow/lite/micro/micro_interpreter.h"
+
+// Step 1: Tell TFLite Micro where your model bytes are
+const tflite::Model* model = tflite::GetModel(magic_wand_model_data);
+
+// Step 2: Set up interpreter with a tensor arena (working memory)
+uint8_t tensor_arena[2048];  // Scratch space for intermediate calculations
+tflite::MicroInterpreter interpreter(model, resolver, tensor_arena, 2048);
+
+// Step 3: Allocate tensors (sets up input/output buffers)
+interpreter.AllocateTensors();
+
+// Step 4: Copy your sensor data to input tensor
+TfLiteTensor* input = interpreter.input(0);
+input->data.int8[0] = /* your accelerometer x[0] */;
+input->data.int8[1] = /* your accelerometer y[0] */;
+// ... (150 values total: 50 timesteps × 3 axes)
+
+// Step 5: Run inference
+interpreter.Invoke();
+
+// Step 6: Read the output
+TfLiteTensor* output = interpreter.output(0);
+int8_t wave_score = output->data.int8[0];  // Confidence for "Wave"
+int8_t idle_score = output->data.int8[1];  // Confidence for "Idle"
+```
+
+**Phase 3 will teach you:**
+- How to set up the TFLite Micro library
+- How to configure the tensor arena (memory for intermediate calculations)
+- How to copy sensor data into the input tensor
+- How to run `.Invoke()` and read the output
+- How to interpret quantized int8 outputs
+
+#### Key Takeaway
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  Phase 2 (YOU ARE HERE):                                       │
+│  ✅ Understand WHAT the bytes mean (FlatBuffer format)         │
+│  ✅ Know your model IS the C byte array                        │
+│                                                                │
+│  Phase 3 (NEXT):                                               │
+│  🔜 Learn HOW to pass those bytes to TFLite Micro             │
+│  🔜 Write code that runs inference on a microcontroller        │
+└────────────────────────────────────────────────────────────────┘
+```
+
+You've done the **hard part** (understanding the underlying format). Using it is simpler than you think — TFLite Micro abstracts away all the offset-following and table-walking you just learned!
+
+---
+
 ### ✅ Quick Check — Test Your Understanding!
 
 **Q1:** You see `0x54, 0x46, 0x4C, 0x33` at byte position 4 of a file. What is it and what does it mean?
