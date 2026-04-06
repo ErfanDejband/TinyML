@@ -17,8 +17,8 @@
 | Phase | Description | Status |
 |-------|-------------|--------|
 | **Phase 1** | TinyML Foundations (Data, Windowing, CNN, Pruning, Quantization) | ✅ Complete |
-| **Phase 2** | From Python to C (xxd export, .h header, FlatBuffer understanding) | 🔄 Starting |
-| **Phase 3** | From Basic C to Embedded C++ (TFLite Micro, Tensor Arena, Inference) | ⏳ Next |
+| **Phase 2** | From Python to C (xxd export, .h header, FlatBuffer understanding) | ✅ Complete (Ready for Phase 3) |
+| **Phase 3** | From Basic C to Embedded C++ (TFLite Micro, Tensor Arena, Inference) | 🔄 Next |
 | **Phase 4** | Hardware Implementation (Real-time on phone/Arduino) | ⏳ Future |
 
 ## Project Files
@@ -62,8 +62,8 @@ TinyML/
 | Phase | Description | Status |
 |-------|------------|--------|
 | Phase 1 | TinyML Foundations (Data, CNN, Pruning, Quantization) | ✅ Complete |
-| Phase 2 | From Model to C (xxd, hex, FlatBuffers, `.h` header) | 🔄 Step 2 done (xxd conversion), Steps 3-6 remaining |
-| Phase 3 | Embedded C/C++ (TFLite Micro, Tensor Arena) | 🔜 Not started |
+| Phase 2 | From Model to C (xxd, hex, FlatBuffers, `.h` header) | ✅ Complete — All 6 sections learned, C headers created |
+| Phase 3 | Embedded C/C++ (TFLite Micro, Tensor Arena) | 🔄 Ready to start |
 | Phase 4 | Hardware Implementation (real-time on device) | 🔜 Not started |
 
 ## My Model Specs
@@ -88,6 +88,8 @@ TinyML/
 - ✅ Fixed: `tf_keras` import issue (was `ModuleNotFoundError`)
 
 ## Key Concepts I've Mastered
+
+### Phase 1: TinyML Foundations
 - Sliding windows and why single data points are meaningless for gesture recognition
 - CNN architecture for time-series (Conv1D, not Conv2D)
 - Pruning: masks, schedules (ConstantSparsity vs PolynomialDecay), callbacks, stripping
@@ -97,9 +99,18 @@ TinyML/
 - Why quantization needs representative data (for activation ranges, not weight ranges)
 - TFLite FlatBuffer format vs Keras .h5 format
 
-## What I'm Learning Next
-- Converting .tflite to C header array (xxd)
-- Understanding hexadecimal representation of the model
-- TFLite Micro interpreter setup in C++
-- Memory arenas and tensor allocation
-- Running inference without Python
+### Phase 2: From Model to C
+- Hexadecimal number system and why it maps perfectly to bytes (4 bits = 1 hex digit)
+- The xxd tool for converting binary files to C arrays
+- Flash ROM vs RAM memory (const keyword, why models live in Flash)
+- FlatBuffers: vtables, offsets, inline vs referenced data, root table navigation
+- C header files: include guards, extern declarations, alignas for optimization
+- Model verification techniques (byte comparison, FlatBuffer structure validation)
+
+## What I'm Learning Next (Phase 3)
+- Setting up TFLite Micro library in a C++ project
+- Understanding tensor arenas and memory allocation strategies
+- Configuring the MicroOpResolver with required operators
+- Writing C++ inference code and handling input/output tensors
+- Comparing Python vs C++ inference results for verification
+- Optimizing tensor arena size and understanding memory constraints
