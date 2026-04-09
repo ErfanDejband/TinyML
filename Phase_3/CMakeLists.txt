@@ -7,4 +7,4 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Create executable from main.cpp
-add_executable(main main.cpp)
+add_executable(main main.cpp magic_wand_model_data.c)

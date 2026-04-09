@@ -2987,6 +2987,46 @@ g++ main.cpp -o program  # Compile
 - Compilation catches errors BEFORE running
 - Compiled code runs MUCH faster (important for embedded!)
 
+#### 💡 CMake Quick Tips (Lessons Learned)
+
+**Tip 1: When to Update CMakeLists.txt**
+- ✅ **Add `.c` or `.cpp` files** → Update `add_executable()`
+- ❌ **Add `.h` header files** → No change needed (headers are found via `#include`)
+
+```cmake
+# Example: Adding your model data file
+add_executable(main
+    main.cpp
+    magic_wand_model_data.c  # ← Must add .c files!
+)
+# magic_wand_model_data.h automatically found via #include
+```
+
+**Tip 2: How to Know if a Header Needs a `.c` File**
+
+Look for the `extern` keyword in the header:
+```cpp
+// ✅ This PROMISES something → needs a .c file
+extern const unsigned char my_data[];
+
+// ❌ This DEFINES something → NO .c file needed
+inline int add(int a, int b) { return a + b; }
+#define MAX_SIZE 100
+```
+
+**Rule:** If you see `extern` → you need a matching `.c`/`.cpp` file in CMakeLists.txt
+
+**Tip 3: C++ Declaration Order (Common Error)**
+```cpp
+// ❌ WRONG: alignas in wrong position
+extern alignas(16) const unsigned char data[];
+
+// ✅ CORRECT: alignas comes first
+alignas(16) extern const unsigned char data[];
+```
+
+**Memory Aid:** `[alignment] [storage-class] [type-qualifiers] [type]`
+
 ---
 
 ### 🎯 Section 2 Summary
