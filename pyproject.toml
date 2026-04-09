@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "tinyml-gesture-recognition"
+version = "0.1.0"
+description = "TinyML gesture recognition project: Phone Sensor → Python Training → Pruning → Quantization → TFLite → C → Hardware"
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.12"
+# Downgrade pandas to support numpy 1.x
+numpy = "1.26.4"
+pandas = "2.3.3"
+scikit-learn = "1.8.0"
+tensorflow = "2.18.1"
+tf-keras = "2.18.0"
+tensorflow-model-optimization = "0.8.0"
+matplotlib = "3.10.8"
+
+[tool.poetry.group.dev.dependencies]
+# Add development dependencies here if needed (e.g., pytest, black, mypy)
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
