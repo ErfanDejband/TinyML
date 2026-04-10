@@ -19,6 +19,7 @@ matplotlib = "3.10.8"
 
 [tool.poetry.group.dev.dependencies]
 # Add development dependencies here if needed (e.g., pytest, black, mypy)
+ipykernel = "^7.2.0"
 
 [build-system]
 requires = ["poetry-core"]
