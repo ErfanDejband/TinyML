@@ -2,6 +2,50 @@
 
 A TinyML project learning the full pipeline: Phone Sensor → Python Training → Pruning → Quantization → TFLite → C → Hardware.
 
+## 🚀 Getting Started
+
+### Option 1: Poetry (Recommended)
+
+Poetry provides better dependency management, reproducible environments, and prevents version conflicts.
+
+```powershell
+# Set Python interpreter (Windows)
+poetry env use C:\Users\YourName\AppData\Local\Programs\Python\Python312\python.exe
+
+# Install dependencies
+poetry install
+
+# Activate environment
+poetry shell
+
+# Run scripts
+python Phase_1/create_model.py
+```
+
+**Why Poetry?**
+- ✅ Automatic dependency resolution (no conflicts)
+- ✅ Lock file ensures everyone gets identical versions
+- ✅ Modern tooling (`poetry add`, `poetry update`)
+- ✅ Separates dev vs production dependencies
+
+### Option 2: pip + requirements.txt
+
+Traditional approach, works fine for simple projects.
+
+```powershell
+# Create virtual environment
+python -m venv .venv
+.venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run scripts
+python Phase_1/create_model.py
+```
+
+**Note:** This setup uses slightly newer package versions that may have undeclared dependency conflicts. Works in practice but less reliable than Poetry.
+
 ## 🤖 Copilot Prompt Agents
 
 This project includes 3 specialized Copilot prompt agents in `.github/prompts/`. Open Copilot Chat and type `/` to use them:
