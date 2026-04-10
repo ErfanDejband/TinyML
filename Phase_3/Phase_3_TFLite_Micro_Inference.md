@@ -2890,6 +2890,16 @@ int main() {
 <a name="25-compiling-and-linking-basics"></a>
 ### 2.5 Compiling and Linking Basics
 
+> **📝 Note for Your Project:**  
+> This section explains compilation concepts using **manual g++ commands** for educational purposes.  
+> In your actual project, you're using **CMake** (see Section 2.0.3) which automates these steps.  
+> Understanding what g++ does under the hood helps you debug CMake issues and understand build errors!
+>
+> **What you'll learn here:** The theory (manual g++)  
+> **What you'll actually use:** CMake (already set up in your `CMakeLists.txt`)
+
+---
+
 ⚠️ **CODE-HELPER SECTION** ⚠️
 
 **This section requires creating a build system (Makefile).** Ask the **code-helper** agent:
@@ -2906,6 +2916,10 @@ int main() {
 > 8. Add comments explaining each part
 >
 > Also create a simple run.sh script (or .bat for Windows) that compiles and runs the program."
+
+**Note:** If you're already using CMake (recommended!), you can skip the Makefile creation.
+
+---
 
 #### Compilation Process (Conceptual Understanding)
 
@@ -3162,15 +3176,1753 @@ uint8_t tensor_arena[10000];                  // NOT const → RAM
 
 ---
 
+<a name="3-the-tensor-arena--memory-management"></a>
+## 3. The Tensor Arena — Memory Management
+
+### Core Concept
+
+The **tensor arena** is a single static byte array that TFLite Micro uses as a **workspace** for all intermediate calculations during inference. Think of it as a **reusable scratch pad** — input tensors, intermediate layer outputs, and temporary buffers all share this one memory space.
+
+### Why This Matters for Your 3,264-Byte Model
+
+Your model lives in Flash ROM (read-only, ~3.2 KB), but **running inference requires RAM**:
+- Input tensor: 50 × 3 × 1 byte = **150 bytes**
+- Conv1D output: 48 × 8 × 1 byte = **384 bytes**
+- MaxPool output: 24 × 8 × 1 byte = **192 bytes**
+- Dense(16) output: 16 × 1 byte = **16 bytes**
+- Dense(2) output: 2 × 1 byte = **2 bytes**
+- + Overhead for bookkeeping
+
+**(see my_model.summary())**
+
+**If we allocated each separately:** 150 + 384 + 192 + 16 + 2 = **744 bytes minimum**
+
+**With tensor arena:** TFLite Micro reuses space → **~10,000 bytes total** (but much less if optimized!)
+
+---
+
+<a name="31-what-is-a-tensor-arena"></a>
+### 3.1 What is a Tensor Arena?
+
+#### The Workspace Concept
+
+**Analogy: Parking Lot vs Dedicated Garage**
+
+```
+❌ Traditional Approach (Desktop/Server):
+┌────────────────────────────────────────────────────┐
+│  Each tensor gets its own memory (malloc/new)      │
+│                                                    │
+│  Input:   [malloc 150 bytes]                       │
+│  Conv1D:  [malloc 384 bytes]                       │
+│  MaxPool: [malloc 192 bytes]                       │
+│  Dense16: [malloc 16 bytes]                        │
+│  Dense2:  [malloc 2 bytes]                         │
+│                                                    │
+│  Total: 744 bytes + overhead + fragmentation       │
+│  Problem: malloc() doesn't exist on µC! 😱        │
+└────────────────────────────────────────────────────┘
+
+✅ TFLite Micro Approach (Embedded):
+┌────────────────────────────────────────────────────┐
+│  One big static array — the "Arena"                │
+│  uint8_t tensor_arena[10000];                      │
+│                                                    │
+│  [Input uses bytes 0-149     ]                     │
+│  [Conv1D uses bytes 150-533  ] ← Can overlap later │
+│  [MaxPool uses bytes 534-725 ]                     │
+│  [Dense16 uses bytes 0-15    ] ← REUSED space!     │
+│  [Dense2 uses bytes 16-17    ]                     │
+│                                                    │
+│  Total: 10,000 bytes allocated once                │
+│  Actually used: ~2,000 bytes (rest is safety)      │
+└────────────────────────────────────────────────────┘
+```
+
+**Key Insight:** Layers execute **sequentially**, so their memory can be **reused** after they finish!
+
+---
+
+#### What Gets Stored in the Arena?
+
+**Think of the arena as a parking lot with different zones:**
+
+```
+┌─────────────────────────────────────────────────────────┐
+│           TENSOR ARENA (10,000 bytes)                   │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  Zone 1: INPUT TENSOR                                   │
+│    ┌──────────────────────────┐                         │
+│    │ Your 50×3 accelerometer  │                         │
+│    │ data (150 bytes)         │                         │
+│    └──────────────────────────┘                         │
+│                                                         │
+│  Zone 2: INTERMEDIATE TENSORS (Reusable!)               │
+│    ┌─────────────────────────────────────┐              │
+│    │ Conv1D output (48×8 = 384 bytes)    │              │
+│    │ MaxPool output (24×8 = 192 bytes)   │              │
+│    │ Flatten (same memory, just reshape) │              │
+│    └─────────────────────────────────────┘              │
+│      ↑                                                  │
+│      This space gets REUSED by Dense layers!            │
+│                                                         │
+│  Zone 3: OUTPUT TENSOR                                  │
+│    ┌──────────────┐                                     │
+│    │ Wave: -95    │                                     │
+│    │ Idle: 82     │ (2 bytes)                           │
+│    └──────────────┘                                     │
+│                                                         │
+│  Zone 4: BOOKKEEPING (TFLite Micro metadata)            │
+│    - Tensor descriptors                                 │
+│    - Shape information                                  │
+│    - Quantization params (scale, zero-point)            │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
+#### Why "Arena"?
+
+The term comes from **memory arena allocation** — a technique where:
+1. You allocate one big chunk of memory upfront
+2. You subdivide it as needed
+3. You reuse space when possible
+4. You free it all at once (or never, in embedded!)
+
+**Analogy:** 
+- **malloc/new (desktop):** Like renting individual hotel rooms for each guest
+- **Arena (embedded):** Like having one conference hall where you rearrange chairs for different meetings
+
+---
+
+#### Python ↔ C++ Comparison
+
+**Python (NumPy/TensorFlow):**
+```python
+# Python automatically manages memory
+import numpy as np
+import tensorflow as tf
+
+# Each layer output is its own array
+input_data = np.zeros((1, 50, 3), dtype=np.int8)
+conv_output = model.layers[0](input_data)  # New array allocated
+pool_output = model.layers[1](conv_output) # New array allocated
+# ... Python garbage collector cleans up later
+```
+
+**C++ (TFLite Micro):**
+```cpp
+// You must provide the arena manually
+uint8_t tensor_arena[10000];  // Static allocation
+                              // ↑ Lives in RAM for entire program
+
+// TFLite Micro subdivides this arena internally
+MicroInterpreter interpreter(
+    model, resolver, 
+    tensor_arena, sizeof(tensor_arena)  // Give it the workspace
+);
+
+// Interpreter reuses arena space during inference
+interpreter.Invoke();  // All layers share the arena!
+```
+
+---
+
+#### Real Memory Layout for YOUR Model
+
+Let's trace what happens with your gesture recognition model:
+
+```
+Step-by-Step Arena Usage:
+
+STEP 1: Input Layer (50×3 int8)
+┌──────────────────────────────────────┐
+│ [0-149]: Input data (150 bytes)      │ ← You copy sensor data here
+│ [150-9999]: Available (9,850 bytes)  │
+└──────────────────────────────────────┘
+
+STEP 2: Conv1D (kernel=3, filters=8)
+┌──────────────────────────────────────┐
+│ [0-149]: Input (still needed)        │ ← Conv reads from here
+│ [150-533]: Conv output (384 bytes)   │ ← Conv writes here
+│ [534-9999]: Available (9,466 bytes)  │
+└──────────────────────────────────────┘
+
+STEP 3: MaxPooling1D (pool_size=2)
+┌──────────────────────────────────────┐
+│ [0-149]: Input (no longer needed!)   │ ← CAN BE REUSED NOW!
+│ [150-533]: Conv (no longer needed!)  │ ← CAN BE REUSED NOW!
+│ [534-725]: MaxPool out (192 bytes)   │ ← MaxPool writes here
+│ [726-9999]: Available (9,274 bytes)  │
+└──────────────────────────────────────┘
+
+STEP 4: Flatten (no memory needed, just pointer arithmetic)
+
+STEP 5: Dense(16) with ReLU
+┌──────────────────────────────────────┐
+│ [0-191]: Dense16 input (192 bytes)   │ ← REUSES old input space!
+│ [192-207]: Dense16 out (16 bytes)    │
+│ [208-9999]: Available (9,792 bytes)  │
+└──────────────────────────────────────┘
+
+STEP 6: Dense(2) with Softmax
+┌──────────────────────────────────────┐
+│ [0-15]: Dense16 (no longer needed)   │
+│ [16-17]: OUTPUT (2 bytes)            │ ← Your final prediction!
+│ [18-9999]: Available (9,982 bytes)   │
+└──────────────────────────────────────┘
+
+Maximum simultaneous usage: ~600 bytes
+Allocated: 10,000 bytes (safety margin)
+```
+
+**Why so much extra space?**
+- Safety margin for bookkeeping
+- Alignment requirements (some ops need 16-byte alignment)
+- Future model changes
+- Better safe than sorry on real hardware!
+
+---
+
+#### Tensor Arena in Your Code (Preview)
+
+```cpp
+// This is what you'll write in main.cpp:
+
+#include <cstdint>
+
+// STEP 1: Declare the arena (static memory)
+constexpr int kTensorArenaSize = 10000;
+uint8_t tensor_arena[kTensorArenaSize];
+           ↑              ↑
+     Type: byte array    Size: 10KB
+
+// STEP 2: Pass it to TFLite Micro
+MicroInterpreter interpreter(
+    model,                    // Your model from Phase 2
+    resolver,                 // Operations (Section 4)
+    tensor_arena,             // The workspace!
+    kTensorArenaSize,         // Its size
+    error_reporter            // Error handling (optional)
+);
+
+// STEP 3: Allocate tensors within the arena
+if (interpreter.AllocateTensors() != kTfLiteOk) {
+    printf("ERROR: Arena too small!\n");
+    return -1;
+}
+
+// STEP 4: Run inference (uses the arena)
+interpreter.Invoke();
+```
+
+---
+
+#### Key Characteristics of the Tensor Arena
+
+| Property | Value | Why It Matters |
+|----------|-------|----------------|
+| **Type** | `uint8_t[]` | Byte-addressable, works with all data types |
+| **Allocation** | Static (compile-time) | No malloc/free — predictable! |
+| **Lifetime** | Entire program | Allocated once, never freed |
+| **Location** | RAM (not Flash) | Needs to be writable |
+| **Size** | Fixed at compile-time | Must be large enough for worst case |
+| **Reusability** | High | Layers reuse each other's space |
+
+---
+
+#### Common Misconceptions
+
+**❌ Myth: "Arena size must equal model size"**
+```
+Model size (Flash): 3,264 bytes
+Arena size (RAM): 10,000 bytes
+They're DIFFERENT!
+```
+- Model = weights/biases (stored in Flash, read-only)
+- Arena = scratch space for calculations (stored in RAM, read-write)
+
+**❌ Myth: "Each tensor needs its own array"**
+```cpp
+// ❌ DON'T do this:
+int8_t input[150];
+int8_t conv_output[384];
+int8_t pool_output[192];
+// Total: 726 bytes + not reusable!
+
+// ✅ DO this:
+uint8_t tensor_arena[10000];
+// TFLite Micro manages it all!
+```
+
+**❌ Myth: "10,000 bytes is always the right size"**
+- Your model might need **less** (start at 2,000, increase if needed)
+- Your model might need **more** (rare, but possible)
+- Section 3.4 will show you how to find the optimal size!
+
+---
+
+### ✅ Quick Check — Tensor Arena Edition
+
+**Q1:** Where does the tensor arena live — Flash ROM or RAM? Why?
+
+<details>
+<summary>Click for answer</summary>
+
+**RAM (not Flash).**
+
+**Why?**
+- The arena is a **workspace** — values change constantly during inference
+- Flash is read-only (where your model weights live)
+- RAM is read-write (where intermediate calculations happen)
+
+**Analogy:**
+- Flash ROM = Cookbook (permanent, read-only)
+- RAM arena = Kitchen counter (temporary, writable)
+
+</details>
+
+**Q2:** Your model is 3,264 bytes. Why does the arena need to be 10,000 bytes?
+
+<details>
+<summary>Click for answer</summary>
+
+**Different purposes:**
+
+| Thing | Size | Where | Why |
+|-------|------|-------|-----|
+| **Model weights** | 3,264 bytes | Flash ROM | Stored permanently |
+| **Arena workspace** | 10,000 bytes | RAM | Space for calculations |
+
+**The arena needs to hold:**
+- Input data (150 bytes)
+- Intermediate tensors (up to 384 bytes)
+- Output data (2 bytes)
+- Bookkeeping metadata (~50-100 bytes)
+- Safety margin (the rest)
+
+**Not the same as model size!**
+
+</details>
+
+**Q3:** Can you use `malloc()` to create the arena instead of a static array?
+
+<details>
+<summary>Click for answer</summary>
+
+**Technically yes on desktop, but NO on microcontrollers!**
+
+```cpp
+// ❌ Desktop C++ (works but discouraged)
+uint8_t* arena = (uint8_t*)malloc(10000);
+// Problem: malloc might fail, adds overhead
+
+// ✅ Embedded C++ (correct way)
+uint8_t tensor_arena[10000];
+// Guaranteed at compile-time, zero overhead
+```
+
+**On many microcontrollers:**
+- `malloc()` doesn't exist (no heap!)
+- Or it's disabled to ensure predictability
+- Static allocation is the embedded way
+
+**TinyML = predictable, deterministic — no surprises!**
+
+</details>
+
+**Q4:** After Conv1D finishes, can its output space be reused by MaxPool?
+
+<details>
+<summary>Click for answer</summary>
+
+**Not immediately, but YES eventually!**
+
+**Sequence:**
+1. Conv1D reads Input, writes to Conv Output
+2. MaxPool reads **Conv Output**, writes to MaxPool Output
+3. **Now** Conv Output space can be reused!
+
+**TFLite Micro tracks dependencies:**
+- Keeps tensors alive while they're still needed
+- Frees space once no layer depends on them
+- Plays "Tetris" to fit everything efficiently
+
+**This is why arena can be smaller than sum of all tensors!**
+
+</details>
+
+---
+
+**Next:** Continue to **Section 3.2: Stack vs Heap vs Static Memory** to understand WHERE the arena lives in your microcontroller's memory map!
+
+---
+
+<a name="32-stack-vs-heap-vs-static-memory"></a>
+### 3.2 Stack vs Heap vs Static Memory
+
+#### Core Concept
+
+C/C++ has **three main memory regions** where variables can live. Understanding these is critical for embedded systems because microcontrollers have **very limited RAM** (often just 8-64 KB!).
+
+---
+
+#### The Three Memory Regions
+
+**Visual Memory Map:**
+
+```
+MICROCONTROLLER MEMORY (Example: ARM Cortex-M4)
+
+┌─────────────────────────────────────────────────────┐
+│ FLASH ROM (Read-Only, 256 KB)                       │
+│ ┌─────────────────────────────────────────────────┐ │
+│ │ Program Code (.text section)                    │ │
+│ │   - Your main() function                        │ │
+│ │   - TFLite Micro library code                   │ │
+│ │   - All compiled C++ instructions               │ │
+│ ├─────────────────────────────────────────────────┤ │
+│ │ Const Data (.rodata section)                    │ │
+│ │   - Your model: magic_wand_model_data[] ← 3.2KB │ │
+│ │   - String literals: "Hello"                    │ │
+│ │   - const variables                             │ │
+│ └─────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────┘
+                         ↓ (CPU fetches instructions)
+┌─────────────────────────────────────────────────────┐
+│ RAM (Read-Write, 8 KB total)                        │
+│ ┌─────────────────────────────────────────────────┐ │
+│ │ STATIC/GLOBAL (.data + .bss, ~2-4 KB)           │ │
+│ │   - Global variables                            │ │
+│ │   - Static variables                            │ │
+│ │   - tensor_arena[10000] ← YOUR ARENA HERE! ✅   │ │
+│ │   - Lifetime: Entire program                    │ │
+│ ├─────────────────────────────────────────────────┤ │
+│ │ HEAP (Dynamic allocation, 0-2 KB)               │ │
+│ │   - malloc() allocations                        │ │
+│ │   - new operator (C++)                          │ │
+│ │   - Often DISABLED in embedded! ⚠️              │ │
+│ │   - Lifetime: Until free()                      │ │
+│ ├─────────────────────────────────────────────────┤ │
+│ │            ↕ (Grows toward each other)          │ │
+│ ├─────────────────────────────────────────────────┤ │
+│ │ STACK (Function calls, ~2-4 KB)                 │ │
+│ │   - Local variables                             │ │
+│ │   - Function parameters                         │ │
+│ │   - Return addresses                            │ │
+│ │   - Lifetime: Until function returns            │ │
+│ │   - Grows DOWNWARD ↓                            │ │
+│ └─────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────┘
+```
+
+---
+
+#### 1. Stack Memory
+
+**What it is:**
+- Automatic storage for **local variables** and **function calls**
+- Very fast (just move a pointer!)
+- Limited size (typically 2-4 KB on microcontrollers)
+- LIFO (Last In, First Out) — like a stack of plates
+
+**Example:**
+```cpp
+void process_sensor_data() {
+    int8_t temp_buffer[10];  // ← On STACK (10 bytes)
+    int counter = 0;          // ← On STACK (4 bytes)
+    
+    // When function returns, ALL stack memory is freed automatically!
+}
+```
+
+**Characteristics:**
+- ✅ **Fast:** Just increment/decrement a pointer
+- ✅ **Automatic:** Freed when function returns
+- ❌ **Limited size:** Stack overflow = crash!
+- ❌ **Short lifetime:** Gone after function returns
+
+**Why NOT use stack for tensor arena?**
+```cpp
+void run_inference() {
+    uint8_t tensor_arena[10000];  // ❌ TOO BIG FOR STACK!
+    // Stack might be only 4 KB → STACK OVERFLOW → CRASH!
+}
+```
+
+**Analogy:** Stack = Your hands (fast but limited capacity — can't hold 10,000 items!)
+
+---
+
+#### 2. Heap Memory
+
+**What it is:**
+- Dynamic storage using `malloc()` / `new`
+- Flexible size (allocate exactly what you need)
+- Manual management (you must `free()` / `delete`)
+- Fragmentation issues over time
+
+**Example:**
+```cpp
+void run_inference() {
+    // Allocate at runtime
+    uint8_t* tensor_arena = (uint8_t*)malloc(10000);
+    
+    // Use it...
+    
+    free(tensor_arena);  // Must remember to free!
+}
+```
+
+**Characteristics:**
+- ✅ **Flexible:** Allocate any size at runtime
+- ✅ **Long lifetime:** Lives until you free it
+- ❌ **Slow:** Requires bookkeeping, can fail
+- ❌ **Fragmentation:** Memory becomes "swiss cheese"
+- ❌ **Unpredictable:** malloc() might fail!
+
+**Why NOT use heap for embedded TinyML?**
+
+```
+Problem 1: Fragmentation
+┌────────────────────────────────────────┐
+│ [used][free][used][free][used][free]   │ ← After many malloc/free
+│ Want 1000 bytes? Can't find continuous │
+│ space even though total free = 1500!   │
+└────────────────────────────────────────┘
+
+Problem 2: Unpredictability
+malloc(10000);  // Might return NULL!
+                // → Inference fails mid-flight
+                // → Unacceptable in embedded!
+
+Problem 3: Often Disabled
+Many embedded systems DISABLE heap entirely!
+malloc() → returns NULL or doesn't exist
+```
+
+**Analogy:** Heap = Storage unit rental (flexible but messy, rental might be full!)
+
+---
+
+#### 3. Static/Global Memory
+
+**What it is:**
+- Variables declared outside functions (global) or with `static` keyword
+- Allocated at **compile-time** (size known before program runs)
+- Lives for **entire program** (never freed)
+- Stored in RAM's `.data` or `.bss` sections
+
+**Example:**
+```cpp
+// GLOBAL VARIABLE (outside any function)
+uint8_t tensor_arena[10000];  // ← STATIC MEMORY! ✅
+
+int main() {
+    // tensor_arena exists for entire program
+    // No allocation, no freeing needed!
+}
+```
+
+**Characteristics:**
+- ✅ **Predictable:** Size known at compile-time
+- ✅ **Fast:** No allocation overhead (already there!)
+- ✅ **Reliable:** Can't fail (allocated at startup)
+- ✅ **Zero fragmentation:** No malloc/free
+- ⚠️ **Fixed size:** Can't change at runtime
+- ⚠️ **Uses RAM:** Counts toward your 8 KB limit
+
+**Why USE static for tensor arena?**
+- ✅ Embedded systems LOVE predictability
+- ✅ No malloc() failures possible
+- ✅ Known at compile-time → can verify it fits!
+- ✅ Zero overhead
+
+**Analogy:** Static = Your house (permanent, reliable, but size is fixed!)
+
+---
+
+#### Comparison Table
+
+| Aspect | Stack | Heap | Static/Global |
+|--------|-------|------|---------------|
+| **Allocation** | Automatic (on function call) | Manual (`malloc`/`new`) | Compile-time |
+| **Deallocation** | Automatic (on return) | Manual (`free`/`delete`) | Never (or at exit) |
+| **Speed** | ⚡ Very fast | 🐌 Slower | ⚡ Very fast |
+| **Size limit** | ~2-4 KB | ~0-2 KB | Limited by RAM |
+| **Lifetime** | Until function returns | Until you free | Entire program |
+| **Predictable?** | ✅ Yes | ❌ No (can fail!) | ✅ Yes |
+| **Fragmentation?** | ✅ No | ❌ Yes | ✅ No |
+| **Use for arena?** | ❌ Too small | ❌ Unreliable | ✅ PERFECT! |
+
+---
+
+#### Python ↔ C++ Memory Comparison
+
+**Python (Everything is Heap):**
+```python
+# Python hides all memory management
+def run_inference():
+    tensor_arena = [0] * 10000  # List allocated on heap
+    # Python garbage collector frees it automatically
+    # You never think about stack vs heap!
+```
+
+**C++ (You Choose):**
+```cpp
+void run_inference() {
+    // Option 1: Stack (automatic, but too small for arena)
+    int8_t small_buffer[100];  // OK for small arrays
+    
+    // Option 2: Heap (flexible, but risky in embedded)
+    uint8_t* arena = new uint8_t[10000];  // ❌ Avoid!
+    delete[] arena;
+    
+    // Option 3: Static (best for embedded)
+    static uint8_t tensor_arena[10000];  // ✅ Use this!
+}
+```
+
+---
+
+#### Real Example: Where YOUR Variables Live
+
+```cpp
+// ==================== FLASH ROM ====================
+const uint8_t magic_wand_model_data[] = { ... };  // 3,264 bytes in Flash
+                                                   // ↑ const = read-only
+
+// ==================== STATIC RAM ====================
+uint8_t tensor_arena[10000];  // 10,000 bytes in RAM
+                              // ↑ No const = read-write
+
+int main() {
+    // ==================== STACK ====================
+    int result = 0;  // 4 bytes on stack
+    
+    // Use tensor_arena (from static RAM)
+    MicroInterpreter interpreter(..., tensor_arena, ...);
+    
+    // Use model data (from Flash ROM)
+    const uint8_t* model_ptr = magic_wand_model_data;
+    
+    return result;  // Stack freed here
+}
+```
+
+**Memory Layout:**
+```
+Flash ROM:  [magic_wand_model_data: 3,264 bytes] ← Read-only
+RAM Static: [tensor_arena: 10,000 bytes] ← Read-write, lives forever
+RAM Stack:  [result: 4 bytes] ← Temporary, freed on return
+```
+
+---
+
+#### Why Microcontrollers Often Disable Heap
+
+**Reasons embedded systems avoid malloc/heap:**
+
+1. **Fragmentation** → Unpredictable failures
+2. **Non-determinism** → malloc() time varies
+3. **Safety** → malloc() can return NULL
+4. **Certification** → Safety-critical systems ban dynamic allocation
+5. **Simplicity** → Static allocation is easier to analyze
+
+**Quote from embedded guidelines:**
+> "Dynamic memory allocation shall not be used."
+> — MISRA C (automotive standard)
+
+---
+
+### ✅ Quick Check — Memory Types Edition
+
+**Q1:** Where should the tensor arena live — Stack, Heap, or Static?
+
+<details>
+<summary>Click for answer</summary>
+
+**Static/Global memory ✅**
+
+**Why not Stack?**
+- Stack is too small (~2-4 KB)
+- Arena needs 10 KB → Stack overflow!
+
+**Why not Heap?**
+- malloc() might fail (unpredictable)
+- Fragmentation issues
+- Often disabled in embedded systems
+
+**Why Static?**
+- ✅ Predictable (allocated at compile-time)
+- ✅ Reliable (can't fail)
+- ✅ Lives for entire program (no freeing needed)
+
+</details>
+
+**Q2:** This code crashes. Why?
+
+```cpp
+void run_inference() {
+    uint8_t tensor_arena[10000];  // Crashes!
+    // ...
+}
+```
+
+<details>
+<summary>Click for answer</summary>
+
+**Stack overflow! ⚠️**
+
+The array is on the **stack**, which is typically only 2-4 KB. Trying to allocate 10 KB exceeds the stack limit.
+
+**Fix:**
+```cpp
+// Move to static memory (outside function)
+uint8_t tensor_arena[10000];
+
+void run_inference() {
+    // Now it works!
+}
+```
+
+Or use `static` keyword inside the function:
+```cpp
+void run_inference() {
+    static uint8_t tensor_arena[10000];  // ✅ Static, not stack!
+}
+```
+
+</details>
+
+**Q3:** What's the difference between these two declarations?
+
+```cpp
+const uint8_t model_data[] = { ... };    // A
+uint8_t tensor_arena[10000];              // B
+```
+
+<details>
+<summary>Click for answer</summary>
+
+| Declaration | `const`? | Where | Purpose |
+|-------------|----------|-------|---------|
+| **A (model_data)** | ✅ Yes | Flash ROM | Read-only weights |
+| **B (tensor_arena)** | ❌ No | RAM | Read-write workspace |
+
+**Key difference:**
+- `const` = Flash ROM (permanent storage, no RAM used)
+- No `const` = RAM (temporary workspace, read-write)
+
+**Memory usage:**
+```
+Flash: model_data (3,264 bytes)
+RAM:   tensor_arena (10,000 bytes)
+Total RAM: Only 10,000 bytes (model stays in Flash!)
+```
+
+</details>
+
+---
+
+**Next:** Continue to **Section 3.3: Why We Use a Static Byte Array**
+
+---
+
+<a name="33-why-we-use-a-static-byte-array"></a>
+### 3.3 Why We Use a Static Byte Array
+
+#### Core Concept
+
+The tensor arena is declared as:
+```cpp
+uint8_t tensor_arena[10000];
+```
+
+Let's break down **why each part matters**:
+- `uint8_t` (not `int` or `float`)
+- Array `[]` (not pointer or class)
+- `10000` (how to choose this number)
+- Static (not on stack or heap)
+
+---
+
+#### Why `uint8_t` (Byte Array)?
+
+**Reason 1: Byte-Addressable Storage**
+
+TFLite Micro needs to store **many different data types**:
+- `int8_t` values (your model input/output)
+- `int16_t` intermediate calculations
+- `int32_t` metadata (tensor shapes, strides)
+- Pointers (4-8 bytes each)
+
+**A byte array is the universal container:**
+
+```cpp
+// The arena is just bytes
+uint8_t tensor_arena[10000];
+        ↑
+     Byte array (8 bits each)
+
+// TFLite Micro interprets bytes as needed
+int8_t* input_tensor = (int8_t*)&tensor_arena[0];      // Bytes 0-149
+int16_t* intermediate = (int16_t*)&tensor_arena[200];  // Bytes 200-399
+int32_t* metadata = (int32_t*)&tensor_arena[500];      // Bytes 500-503
+```
+
+**Analogy:** The arena is like a **blank notebook** — you can write numbers, text, diagrams, whatever you need. Bytes are the universal "ink."
+
+---
+
+**Reason 2: Alignment Flexibility**
+
+Some processors require data to be **aligned** (e.g., 4-byte aligned, 16-byte aligned):
+
+```cpp
+// Bad (might crash on some CPUs):
+uint32_t value = *(uint32_t*)&arena[1];  // Unaligned!
+
+// Good (aligned):
+uint32_t value = *(uint32_t*)&arena[0];  // Aligned to 4 bytes
+```
+
+**Byte arrays let TFLite Micro handle alignment:**
+```cpp
+// TFLite Micro ensures proper alignment internally
+uint8_t arena[10000];  // ← Start is aligned
+// Allocations inside maintain alignment
+```
+
+---
+
+**Reason 3: Matches Memory Model**
+
+At the hardware level, RAM is just **bytes**:
+
+```
+Your Microcontroller's RAM:
+Address:  0x2000  0x2001  0x2002  0x2003  ...
+Value:    [0x00]  [0x42]  [0x7F]  [0xFF]  ...
+          ↑ Each box = 1 byte
+
+uint8_t arena[4] = {0x00, 0x42, 0x7F, 0xFF};
+                    Maps directly to hardware!
+```
+
+---
+
+#### Why an Array `[]` (Not a Pointer)?
+
+**Arrays vs Pointers in C++:**
+
+```cpp
+// Option 1: Array (what we use)
+uint8_t tensor_arena[10000];
+// - Size known at compile-time
+// - Memory allocated automatically
+// - Lives in .bss section (RAM)
+
+// Option 2: Pointer (avoid in embedded)
+uint8_t* tensor_arena = new uint8_t[10000];
+// - Size determined at runtime
+// - Must manually allocate (new/malloc)
+// - Heap allocation (can fail!)
+```
+
+**Arrays are safer for embedded:**
+
+| Feature | Array `[]` | Pointer `*` (with new/malloc) |
+|---------|-----------|-------------------------------|
+| **Size check** | Compile-time ✅ | Runtime ❌ |
+| **Can fail?** | No ✅ | Yes (malloc returns NULL) ❌ |
+| **Fragmentation** | No ✅ | Yes ❌ |
+| **Performance** | Fast (no allocation) ✅ | Slower (allocation overhead) ❌ |
+| **Predictable** | Yes ✅ | No ❌ |
+
+**Example: Compile-time Safety**
+
+```cpp
+// Array: Compiler checks size at compile-time
+uint8_t arena[10000];
+if (sizeof(arena) < 10000) {  // Compiler knows this is always false!
+    // This code is eliminated
+}
+
+// Pointer: Size not known until runtime
+uint8_t* arena = malloc(10000);
+if (arena == NULL) {  // Must check! malloc might fail!
+    // Handle error... but you're already in trouble
+}
+```
+
+---
+
+#### Why `10000` Bytes? (Sizing Strategy Preview)
+
+**The number comes from:**
+
+1. **Model requirements** (Section 3.4 will detail this)
+2. **Safety margin** (better too big than too small)
+3. **RAM budget** (your microcontroller has 8 KB total, so reserve ~4-6 KB for arena)
+
+> **⚠️ Reality Check:** 10 KB is too big for your 8 KB RAM! This is a **learning example**. In Section 3.4, we'll calculate the right size (~4,000 bytes) that fits your hardware.
+
+**Quick calculation:**
+```
+Input:         50 × 3 × 1 byte =   150 bytes
+Conv1D output: 48 × 8 × 1 byte =   384 bytes
+MaxPool:       24 × 8 × 1 byte =   192 bytes
+Dense16:       16 × 1 byte     =    16 bytes
+Dense2:        2 × 1 byte      =     2 bytes
+Bookkeeping:                    ~ 1000 bytes
+                              ───────────────
+Minimum:                       ~1744 bytes
+Safety margin (5x):            ~8720 bytes
+Rounded up:                    10000 bytes ✅
+```
+
+**More on this in Section 3.4!**
+
+---
+
+#### Why Static (Not Stack or Heap)?
+
+**From Section 3.2, recap:**
+
+```cpp
+// ❌ DON'T: Stack (too small)
+void run_inference() {
+    uint8_t tensor_arena[10000];  // Stack overflow!
+}
+
+// ❌ DON'T: Heap (unreliable)
+uint8_t* tensor_arena = malloc(10000);  // Might fail!
+
+// ✅ DO: Static (perfect for embedded)
+uint8_t tensor_arena[10000];  // Global or static local
+```
+
+**Static means:**
+- Allocated at compile-time (size verified before program runs)
+- Lives for entire program (no freeing needed)
+- In RAM's `.bss` section (zero overhead)
+
+---
+
+#### The Complete Declaration Explained
+
+```cpp
+uint8_t tensor_arena[10000];
+│       │            │
+│       │            └─ Size: 10,000 bytes (calculated for your model)
+│       │
+│       └─ Name: Identifies this specific arena
+│
+└─ Type: Byte array (universal storage for all data types)
+
+// With alignment (optional but recommended):
+alignas(16) uint8_t tensor_arena[10000];
+│           │       │            │
+│           │       │            └─ Size
+│           │       └─ Name
+│           └─ Type
+└─ Alignment: Ensure 16-byte boundaries (hardware optimization)
+```
+
+**Why `alignas(16)`?**
+- Some processors load data faster from aligned addresses
+- 16-byte alignment is common for SIMD instructions
+- TFLite Micro recommends it for performance
+
+---
+
+#### Python ↔ C++ Declaration Comparison
+
+**Python (dynamic, flexible):**
+```python
+# Python automatically manages everything
+tensor_arena = bytearray(10000)  # Dynamic allocation
+# - Size can change at runtime
+# - Garbage collected automatically
+# - No alignment concerns
+```
+
+**C++ (static, explicit):**
+```cpp
+// C++ requires explicit declaration
+uint8_t tensor_arena[10000];  // Static allocation
+// - Size fixed at compile-time
+# - Never freed (lives forever)
+// - Alignment matters
+```
+
+---
+
+#### Real Example: Your Model's Arena
+
+```cpp
+// Phase_3/main.cpp
+
+#include <cstdint>
+
+// STEP 1: Declare the arena (outside main, global scope)
+constexpr int kTensorArenaSize = 10000;
+alignas(16) uint8_t tensor_arena[kTensorArenaSize];
+                                 ↑
+                    Size: 10,000 bytes for your model
+
+int main() {
+    // STEP 2: Pass to TFLite Micro
+    MicroInterpreter interpreter(
+        model_data,              // Your model from Phase 2
+        resolver,                // Operations (Section 4)
+        tensor_arena,            // The arena!
+        kTensorArenaSize         // Its size
+    );
+    
+    // STEP 3: Arena is used during inference
+    interpreter.AllocateTensors();
+    interpreter.Invoke();
+    
+    return 0;  // Arena continues to exist (static lifetime)
+}
+```
+
+---
+
+#### Alternative: Static Inside Function
+
+```cpp
+// Option A: Global (recommended for simple projects)
+uint8_t tensor_arena[10000];  // Outside any function
+
+// Option B: Static local (keeps it scoped to function)
+void run_inference() {
+    static uint8_t tensor_arena[10000];  // Static, but local to function
+    // Acts like global but only visible inside this function
+}
+```
+
+**Both work!** Choose based on your project structure.
+
+---
+
+### ✅ Quick Check — Static Byte Array Edition
+
+**Q1:** Why `uint8_t` instead of `int` or `float` for the arena?
+
+<details>
+<summary>Click for answer</summary>
+
+**`uint8_t` = byte array = universal container ✅**
+
+**Reasons:**
+1. **Flexibility:** Can store any type (int8, int16, int32, pointers, etc.)
+2. **Alignment:** Easier to manage byte-level alignment
+3. **Hardware match:** RAM is addressable by bytes
+4. **Size precision:** Exactly 1 byte per element (no ambiguity)
+
+**Analogy:** Byte array = blank paper (can write anything). Int array = graph paper (only for numbers).
+
+</details>
+
+**Q2:** What's wrong with this?
+
+```cpp
+void run_inference() {
+    uint8_t tensor_arena[10000];
+    MicroInterpreter interpreter(..., tensor_arena, 10000);
+}
+```
+
+<details>
+<summary>Click for answer</summary>
+
+**Stack overflow! ⚠️**
+
+The array is on the **stack** (local variable). Stack is typically only 2-4 KB, but this array needs 10 KB.
+
+> **Note:** 10 KB is also too big for your 8 KB RAM chip! This is a didactic example. Use 4,000 bytes for your actual hardware.
+
+**Fix 1: Make it static**
+```cpp
+void run_inference() {
+    static uint8_t tensor_arena[4000];  // ✅ Static, not stack (realistic size)
+}
+```
+
+**Fix 2: Make it global**
+```cpp
+uint8_t tensor_arena[4000];  // Outside function (realistic size)
+
+void run_inference() {
+    MicroInterpreter interpreter(..., tensor_arena, 4000);
+}
+```
+
+</details>
+
+**Q3:** Why not use `malloc()` to allocate the arena dynamically?
+
+<details>
+<summary>Click for answer</summary>
+
+**Multiple reasons (all critical for embedded):**
+
+1. **Can fail:** malloc() might return NULL → inference fails!
+2. **Fragmentation:** Memory becomes fragmented over time
+3. **Non-deterministic:** Allocation time varies → bad for real-time
+4. **Often disabled:** Many embedded systems don't have malloc()
+5. **Against best practices:** Safety standards ban dynamic allocation
+
+**Static allocation is:**
+- ✅ Predictable (size known at compile-time)
+- ✅ Reliable (can't fail)
+- ✅ Fast (zero overhead)
+- ✅ Deterministic (same behavior every time)
+
+**Embedded philosophy:** "If you can know it at compile-time, do it at compile-time!"
+
+</details>
+
+---
+
+**Next:** Continue to **Section 3.4: How Big Should the Arena Be?** — Learn the sizing strategy for YOUR model!
+
+---
+
+<a name="34-how-big-should-the-arena-be-sizing-strategy"></a>
+### 3.4 How Big Should the Arena Be? (Sizing Strategy)
+
+#### Core Concept
+
+The arena size is **NOT** the model size! It's the **workspace size** needed to run inference. Too small = crash. Too large = wasted RAM. Finding the right size requires understanding your model's memory usage + trial and error.
+
+---
+
+#### The Golden Rule
+
+**Start conservative, then optimize:**
+
+```
+Step 1: Calculate minimum theoretical size
+Step 2: Add safety margin (2-5x)
+Step 3: Test and adjust based on errors
+```
+
+---
+
+#### Calculating Minimum Size for YOUR Model
+
+**Your model architecture:**
+```
+Input(50,3) → Conv1D(8,kernel=3) → MaxPool(2) → Flatten → Dense(16) → Dense(2)
+```
+
+---
+
+#### 🔥 The Magic: How Inference Works (Flash + RAM)
+
+**Step-by-step memory flow for YOUR model:**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   FLASH ROM (Read-Only)                     │
+│  📦 Conv1D weights: ~216 bytes                              │
+│  📦 Dense1 weights: ~784 bytes                              │
+│  📦 Dense2 weights: ~34 bytes                               │
+│  📦 Operation code (Conv, Dense kernels)                    │
+└─────────────────────────────────────────────────────────────┘
+                            ↓ (read directly, no copy!)
+┌─────────────────────────────────────────────────────────────┐
+│              RAM TENSOR ARENA (~4,000 bytes)                │
+│                                                             │
+│  Step 1: Load input → [150 bytes]                           │
+│          ┌─────────────────┐                                │
+│          │ Input: (50, 3)  │                                │
+│          └─────────────────┘                                │
+│                   ↓                                         │
+│  Step 2: Conv1D reads Conv weights from Flash               │
+│          X (RAM) × W (Flash) + B (Flash) = Output           │
+│          ┌─────────────────┐                                │
+│          │ Conv: (48, 8)   │ [384 bytes]                    │
+│          └─────────────────┘                                │
+│          (Input buffer can be freed/reused now! 🔄)         │
+│                   ↓                                         │
+│  Step 3: MaxPool (no weights needed)                        │
+│          ┌─────────────────┐                                │
+│          │ Pool: (24, 8)   │ [192 bytes]                    │
+│          └─────────────────┘                                │
+│          (Conv buffer can be freed/reused now! 🔄)          │
+│                   ↓                                         │
+│  Step 4: Dense1 reads Dense1 weights from Flash             │
+│          X (RAM) × W (Flash) + B (Flash) = Output           │
+│          ┌─────────────────┐                                │
+│          │ Dense1: (16)    │ [16 bytes]                     │
+│          └─────────────────┘                                │
+│                   ↓                                         │
+│  Step 5: Dense2 reads Dense2 weights from Flash             │
+│          ┌─────────────────┐                                │
+│          │ Dense2: (2)     │ [2 bytes] ✅ RESULT!           │
+│          └─────────────────┘                                │
+│                                                             │
+│  Peak simultaneous: ~600 bytes (not all at once!)           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Key Points:**
+
+1. **Weights NEVER enter RAM** — Read directly from Flash during computation
+2. **Only activations (layer outputs) use RAM** — Gets recycled aggressively
+3. **If we hypothetically copied weights to RAM:**
+   - Conv1D: Copy 216 bytes → use → done
+   - Dense1: Copy 784 bytes → use → done (biggest!)
+   - Dense2: Copy 34 bytes → use → done
+   - **Max needed:** ~784 bytes (one layer at a time, NOT 3,264!)
+4. **But we don't copy — we read directly!** Zero weight overhead! 🚀
+
+**Analogy:**
+- **Bad way:** Photocopy entire cookbook page → work on counter → throw away photocopy → repeat
+- **Smart way:** Read recipe from book directly while cooking on counter (keep book on shelf!)
+
+---
+
+**Memory needed at each layer:**
+
+```
+LAYER-BY-LAYER ANALYSIS:
+
+Layer 0: Input
+  Shape: (1, 50, 3)
+  Type: int8_t
+  Size: 1 × 50 × 3 × 1 byte = 150 bytes
+  
+Layer 1: Conv1D
+  Input: (1, 50, 3)
+  Output: (1, 48, 8)  ← 50 - kernel_size + 1 = 48
+  Type: int8_t
+  Size: 1 × 48 × 8 × 1 byte = 384 bytes
+  
+Layer 2: MaxPooling1D
+  Input: (1, 48, 8)
+  Output: (1, 24, 8)  ← 48 / pool_size = 24
+  Type: int8_t
+  Size: 1 × 24 × 8 × 1 byte = 192 bytes
+  
+Layer 3: Flatten
+  Input: (1, 24, 8)
+  Output: (1, 192)  ← Just reshape, no new memory
+  Size: 0 bytes (reuses previous)
+  
+Layer 4: Dense(16)
+  Input: (1, 192)
+  Output: (1, 16)
+  Type: int8_t
+  Size: 1 × 16 × 1 byte = 16 bytes
+  
+Layer 5: Dense(2) + Softmax
+  Input: (1, 16)
+  Output: (1, 2)
+  Type: int8_t
+  Size: 1 × 2 × 1 byte = 2 bytes
+
+───────────────────────────────────────────
+IF ALL EXISTED SIMULTANEOUSLY:
+  150 + 384 + 192 + 16 + 2 = 744 bytes
+
+BUT THEY DON'T! (Memory is reused)
+```
+
+---
+
+#### Peak Memory Usage (Critical!)
+
+**TFLite Micro reuses memory, but some tensors overlap:**
+
+```
+Timeline of Active Tensors:
+
+Step 1: Load Input
+  Active: [Input: 150 bytes]
+  Total: 150 bytes
+
+Step 2: Conv1D Executes
+  Active: [Input: 150] + [Conv out: 384]
+  Total: 534 bytes  ← Peak so far
+
+Step 3: MaxPool Executes
+  Active: [Conv out: 384] + [MaxPool out: 192]
+  Input can be freed! ← Reuse that 150 bytes
+  Total: 576 bytes  ← New peak!
+
+Step 4: Dense(16) Executes
+  Active: [MaxPool out: 192] + [Dense16 out: 16]
+  Conv out can be freed!
+  Total: 208 bytes
+
+Step 5: Dense(2) Executes
+  Active: [Dense16 out: 16] + [Dense2 out: 2]
+  Total: 18 bytes
+
+───────────────────────────────────────────
+PEAK MEMORY (worst case): ~600 bytes
+```
+
+**But wait, there's more!**
+
+---
+
+#### 🔍 Wait — What About the Layer Operations and Weights?
+
+**Great question!** You calculated tensor sizes, but what about:
+- The Conv1D **operation code** (the kernel that does multiplication)?
+- The **weights and biases** (3,264 bytes from your model)?
+
+**Answer: They live in Flash ROM, NOT the tensor arena!**
+
+```
+┌─────────────────────────────────────────┐
+│         FLASH ROM (Read-Only)           │
+│  ✅ Model weights/biases: 3,264 bytes   │
+│  ✅ TFLite Micro library code           │
+│  ✅ Conv1D operation kernel             │
+│  ✅ MaxPool operation code              │
+│  ✅ Dense layer math functions          │
+│  ✅ Your main program code              │
+└─────────────────────────────────────────┘
+
+┌─────────────────────────────────────────┐
+│      RAM TENSOR ARENA (Read-Write)      │
+│  ✅ Input tensor (150 bytes)            │
+│  ✅ Conv output (384 bytes)             │
+│  ✅ Pool output (192 bytes)             │
+│  ✅ Dense outputs (16 + 2 bytes)        │
+│  ✅ Tensor metadata (descriptors)       │
+│  ❌ NO weights (they stay in Flash)     │
+│  ❌ NO operation code                   │
+└─────────────────────────────────────────┘
+```
+
+**Why this separation?**
+
+| **Flash ROM** | **RAM Tensor Arena** |
+|--------------|---------------------|
+| **Read-only** (can't change during inference) | **Read-write** (changes every inference) |
+| Large (~256 KB on your chip) | Small (~8 KB on your chip) |
+| Stores **code + constants** | Stores **temporary calculations** |
+| Model weights = constant | Activations = change per input |
+
+**Analogy:** 
+- **Flash ROM** = Recipe book (weights) + kitchen tools (operations) — stays the same
+- **Tensor Arena** = Cutting board (workspace) — gets reused for each meal
+
+**Key Insight:**  
+Your 3,264-byte model lives in Flash, so it **doesn't count** toward the tensor arena size! You only need ~1,400 bytes RAM for calculations, not 3,264 + 1,400!
+
+---
+
+#### Hidden Overhead (The Bookkeeping)
+
+TFLite Micro needs extra memory for:
+
+1. **Tensor descriptors** (metadata about each tensor)
+   - Shape: `[1, 50, 3]`
+   - Type: `int8_t`
+   - Quantization params: scale, zero-point
+   - ~50-100 bytes per tensor × 6 tensors = **300-600 bytes**
+
+2. **Operator state** (internal buffers for ops)
+   - Conv1D needs temporary buffers
+   - Softmax needs exp() lookup tables
+   - ~200-500 bytes
+
+3. **Alignment padding**
+   - Ensure 16-byte alignment for performance
+   - ~50-100 bytes wasted
+
+**Total overhead:** ~500-1200 bytes
+
+---
+
+#### The Formula
+
+```
+Arena Size = Peak Tensor Memory + Overhead + Safety Margin
+
+For your model:
+  Peak Tensor Memory:  ~600 bytes
+  Overhead:            ~800 bytes (estimate)
+  ────────────────────────────────
+  Minimum:            ~1400 bytes
+
+  Safety Margin (3x):  ×3
+  ────────────────────────────────
+  Recommended:        ~4200 bytes
+
+  Round up:            5000 bytes  ✅ (good starting point)
+```
+
+---
+
+#### Sizing Strategy (Step by Step)
+
+**Strategy 1: Conservative Approach (Recommended for Learning)**
+
+```cpp
+// Start with generous size
+constexpr int kTensorArenaSize = 10000;  // 10 KB
+uint8_t tensor_arena[kTensorArenaSize];
+```
+
+**Advantages:**
+- ✅ Almost guaranteed to work
+- ✅ Easy to debug (memory isn't the problem)
+- ✅ Can optimize later
+
+**When to use:** Learning, prototyping, desktop testing
+
+---
+
+**Strategy 2: Calculated Approach (For Real Hardware)**
+
+```cpp
+// Calculate based on model
+constexpr int kTensorArenaSize = 5000;  // 5 KB (calculated + margin)
+uint8_t tensor_arena[kTensorArenaSize];
+```
+
+**Process:**
+1. Estimate peak memory (600 bytes)
+2. Add overhead (800 bytes)
+3. Multiply by safety factor (3x)
+4. Round up to nice number (5000)
+
+**When to use:** When RAM is limited, production deployment
+
+---
+
+**Strategy 3: Trial and Error (For Optimization)**
+
+```cpp
+// Start small, increase until it works
+constexpr int kTensorArenaSize = 2000;  // Try 2 KB first
+uint8_t tensor_arena[kTensorArenaSize];
+
+// If AllocateTensors() fails, increase by 1000 and try again
+// Repeat until it succeeds
+// Final size = minimum viable + small safety margin
+```
+
+**Process:**
+1. Start at 2000 bytes
+2. Compile and run
+3. If `AllocateTensors()` fails: add 1000, go to step 2
+4. If succeeds: you found the minimum!
+5. Add 10-20% safety margin
+
+**When to use:** Final optimization, production with tight RAM constraints
+
+---
+
+#### Real Example: Finding the Right Size
+
+**Iteration 1: Too Small**
+```cpp
+uint8_t tensor_arena[1000];  // Only 1 KB
+
+// Output:
+// ERROR: AllocateTensors() failed!
+// Arena too small: needs 1400, got 1000
+```
+
+**Iteration 2: Still Too Small**
+```cpp
+uint8_t tensor_arena[2000];  // 2 KB
+
+// Output:
+// ERROR: AllocateTensors() failed!
+// Arena too small: needs 2100, got 2000
+// (Overhead was higher than estimated!)
+```
+
+**Iteration 3: Just Right**
+```cpp
+uint8_t tensor_arena[3000];  // 3 KB
+
+// Output:
+// ✅ AllocateTensors() succeeded!
+// Arena used: 2847 bytes
+// Arena free: 153 bytes
+```
+
+**Final: With Safety Margin**
+```cpp
+uint8_t tensor_arena[4000];  // 4 KB (3000 + 33% margin)
+
+// Output:
+// ✅ AllocateTensors() succeeded!
+// Arena used: 2847 bytes
+// Arena free: 1153 bytes
+```
+
+---
+
+#### How TFLite Micro Reports Arena Usage
+
+**When you run `AllocateTensors()`:**
+
+```cpp
+interpreter.AllocateTensors();
+
+// TFLite Micro (internally):
+// "Need 2847 bytes for tensors"
+// "Arena provides 4000 bytes"
+// "Allocation successful! ✅"
+
+// If arena was too small:
+// "Need 2847 bytes for tensors"
+// "Arena provides 2000 bytes"
+// "ERROR: Arena too small! ❌"
+```
+
+**Enable verbose logging to see details:**
+```cpp
+MicroErrorReporter micro_error_reporter;
+interpreter.AllocateTensors();
+// Console output:
+// "Allocated 150 bytes at offset 0 for input tensor"
+// "Allocated 384 bytes at offset 150 for conv output"
+// ...
+// "Total allocated: 2847 bytes"
+```
+
+---
+
+#### Factors That Affect Arena Size
+
+**Increase arena size if:**
+- ✅ More layers in model
+- ✅ Larger input size (e.g., 100×3 instead of 50×3)
+- ✅ More filters (e.g., Conv1D(16) instead of Conv1D(8))
+- ✅ Bigger intermediate tensors
+- ✅ Using float32 instead of int8 (4x larger!)
+
+**Decrease arena size if:**
+- ✅ Fewer layers
+- ✅ Smaller input (e.g., 25×3)
+- ✅ Fewer filters
+- ✅ More aggressive quantization
+
+---
+
+#### Arena Size vs Model Size (Don't Confuse!)
+
+```
+┌──────────────────────────────────────────────────┐
+│ MODEL SIZE (Flash ROM)                           │
+│                                                  │
+│ magic_wand_model_data[] = { ... };               │
+│ Size: 3,264 bytes                                │
+│ Contains: Weights, biases, architecture          │
+│ Stored: Flash ROM (read-only)                    │
+│ Lifetime: Permanent                              │
+└──────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────┐
+│ ARENA SIZE (RAM)                                 │
+│                                                  │
+│ uint8_t tensor_arena[10000];                     │
+│ Size: 10,000 bytes (BUT only ~3000 used!)       │
+│ Contains: Input, intermediate outputs, metadata  │
+│ Stored: RAM (read-write)                         │
+│ Lifetime: Entire program                         │
+└──────────────────────────────────────────────────┘
+
+They're DIFFERENT and serve DIFFERENT purposes!
+```
+
+---
+
+#### Sizing Table for Common Scenarios
+
+| Model Type | Input Size | Layers | Arena Size (Estimate) |
+|------------|------------|--------|-----------------------|
+| **Your model (Wave/Idle)** | 50×3 | 5 layers | ~4-6 KB |
+| Gesture (4 classes) | 50×3 | 6 layers | ~6-8 KB |
+| Keyword spotting | 49×40 | 8 layers | ~15-20 KB |
+| Image classification (tiny) | 96×96×1 | 10 layers | ~50-80 KB |
+
+**Your target device:** 8 KB RAM → Your model fits! ✅
+
+---
+
+#### Python Analogy
+
+**Python never worries about this!**
+
+```python
+# Python automatically allocates memory
+model = load_model("my_model.tflite")
+output = model.predict(input_data)
+# Garbage collector handles everything
+
+# You never think about "workspace size"!
+```
+
+**In C++, you must pre-allocate:**
+```cpp
+// Must decide size upfront
+uint8_t tensor_arena[???];  // How big?
+```
+
+---
+
+### ✅ Quick Check — Arena Sizing Edition
+
+**Q1:** Your model is 3,264 bytes. Should the arena also be 3,264 bytes?
+
+<details>
+<summary>Click for answer</summary>
+
+**NO! ❌**
+
+**Model size (3,264 bytes):**
+- Weights and biases stored in Flash ROM
+- Read-only, permanent
+
+**Arena size (~4,000-10,000 bytes):**
+- Workspace for calculations in RAM
+- Read-write, temporary
+
+**They're different!**
+
+**Correct sizing:**
+- Model in Flash: 3,264 bytes
+- Arena in RAM: 4,000-10,000 bytes (depending on safety margin)
+
+</details>
+
+**Q2:** You set arena to 2,000 bytes and `AllocateTensors()` fails. What do you do?
+
+<details>
+<summary>Click for answer</summary>
+
+**Increase the arena size! ✅**
+
+**Process:**
+```cpp
+// Try 1: Too small
+uint8_t tensor_arena[2000];  // Fails
+
+// Try 2: Increase
+uint8_t tensor_arena[3000];  // Still fails?
+
+// Try 3: Increase more
+uint8_t tensor_arena[4000];  // Success! ✅
+
+// Final: Add safety margin
+uint8_t tensor_arena[5000];  // Production size
+```
+
+**TFLite Micro will tell you in the error message:**
+```
+ERROR: Tensor arena is too small.
+Arena: 2000 bytes
+Required: 2847 bytes
+```
+
+Just increase until `required < arena`!
+
+</details>
+
+**Q3:** Is it bad to make the arena "too big"?
+
+<details>
+<summary>Click for answer</summary>
+
+**Depends on your RAM budget! ⚠️**
+
+**On desktop (unlimited RAM):**
+- ✅ No problem! Use 100 KB if you want!
+
+**On microcontroller (8 KB RAM):**
+```
+Arena: 10,000 bytes = 10 KB
+Available RAM: 8 KB
+Result: Won't compile! ❌ (not enough RAM)
+```
+
+**Best practice:**
+- Start generous during development (10 KB)
+- Optimize down for production (find minimum)
+- Add 20-30% safety margin
+- Ensure it fits in your RAM budget
+
+**For your 8 KB RAM:**
+```
+Arena: 4-5 KB ✅ (leaves 3-4 KB for stack/other vars)
+Arena: 10 KB ❌ (exceeds total RAM!)
+```
+
+</details>
+
+**Q4:** You optimized to 3,000 bytes and it works. Should you deploy with exactly 3,000?
+
+<details>
+<summary>Click for answer</summary>
+
+**NO! Add safety margin ⚠️**
+
+**Why?**
+- Future model updates might need slightly more
+- Different input patterns might use more memory
+- Compiler differences might affect layout
+- Better safe than sorry!
+
+**Recommendation:**
+```cpp
+// Minimum that works: 3,000 bytes
+// Add 20% safety margin: 3,000 × 1.2 = 3,600
+// Round up: 4,000 bytes
+
+uint8_t tensor_arena[4000];  // ✅ Production size
+```
+
+**Safety margins:**
+- Development: 2-3x (10,000 bytes)
+- Testing: 1.5-2x (6,000 bytes)
+- Production: 1.2-1.3x (4,000 bytes)
+
+</details>
+
+---
+
+**🎉 Section 3 (3.1-3.4) Complete!**
+
+You now understand:
+- ✅ What a tensor arena is (reusable workspace)
+- ✅ Where it lives (Static RAM, not Stack or Heap)
+- ✅ Why static byte arrays (predictable, reliable, fast)
+- ✅ How to size it (calculation + safety margin + trial-and-error)
+
+**Next sections (3.5-3.7):** Deeper dives into AllocateTensors(), common errors, and debugging techniques.
+
+**Ready to continue?** Or take a break and practice what you've learned! 🚀
+
+---
+
 ## Section Status Tracker
 
 Track your progress through Phase 3:
 
-- [x] **Section 1: Introduction to TFLite Micro** - EXPLAINED ✅
-- [x] **Section 2: Setting Up Your First TFLite Micro Project** - EXPLAINED ✅
-- [ ] **Section 3: The Tensor Arena — Memory Management**
-- [ ] **Section 4: The Op Resolver — Registering Operations**
-- [ ] **Section 5: Building the Interpreter**
+- [x] **Section 1: Introduction to TFLite Micro** ✅ EXPLAINED
+- [x] **Section 2: Setting Up Your First TFLite Micro Project** ✅ EXPLAINED  
+- [x] **Section 3: The Tensor Arena — Memory Management** ✅ EXPLAINED (3.1-3.4 complete)
+- [ ] **Section 4: The Op Resolver — Registering Operations** ⏭️ Next
+- [ ] **Section 5: Building the Interpreter** ⏭️ Coming soon
 - [ ] **Section 6: Preparing Input Data**
 - [ ] **Section 7: Running Inference**
 - [ ] **Section 8: Reading Output Data**
