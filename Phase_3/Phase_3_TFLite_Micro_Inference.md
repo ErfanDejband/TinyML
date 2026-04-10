@@ -44,7 +44,7 @@ Phase 2 taught you that the FlatBuffer uses **offset chains** to navigate the mo
    - [1.5 Overview: What We'll Build](#15-overview-what-well-build)
 
 2. [**Setting Up Your First TFLite Micro Project**](#2-setting-up-your-first-tflite-micro-project)
-   - [2.0 C++ Basics for Python Developers (Prerequisites)](#20-cpp-basics-for-python-developers) ⭐ **NEW! Start here if new to C++**
+   - [2.0 C++ Basics for Python Developers (Prerequisites)](#20-cpp-basics-for-python-developers-prerequisites) ⭐ **NEW! Start here if new to C++**
    - [2.1 Project Structure and File Organization](#21-project-structure-and-file-organization)
    - [2.2 Required Headers and Dependencies](#22-required-headers-and-dependencies)
    - [2.3 Including Your Model (`magic_wand_model_data.h`)](#23-including-your-model-magic_wand_model_datah)
@@ -853,7 +853,7 @@ Your **3,264-byte gesture model** is currently just a C array sitting in `Phase_
 
 ---
 
-<a name="20-cpp-basics-for-python-developers"></a>
+<a id="20-cpp-basics-for-python-developers-prerequisites"></a>
 ### 2.0 C++ Basics for Python Developers (Prerequisites)
 
 > **If you're new to C++, START HERE!** This section bridges your Python knowledge to C++.
