@@ -17,5 +17,14 @@ RowCSVData/
 .vscode/
 .idea/
 
+# C/C++ build artifacts
+*.o
+*.a
+*.exe
+Phase_3/main
+
+# TFLite Micro (cloned dependency — not part of our repo)
+tflite-micro/
+
 # GitHub
 # .github/
