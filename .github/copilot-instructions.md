@@ -1,23 +1,21 @@
 # TinyML Project — Copilot Instructions
 
-## Project Overview
-This is a TinyML gesture recognition project (Wave vs Idle) using smartphone accelerometer data.
-The student is learning the full pipeline: Python training → Pruning → Quantization → TFLite → C → Hardware.
-
-## IMPORTANT: Always read these files for context
-- `PROJECT_CONTEXT.md` — Current status, model specs, decisions, known issues
-- Based on the phase you are working on, read the related markdown file for that phase. For example, if you are working on Phase 2, read the markdown file in the Phase_2 folder that starts with Phase_2_. This file will has give you the idea what we learned.
-- All other .md files in the root directory
+## Context
+Read `PROJECT_CONTEXT.md` before any task — it has current status, model specs, and project structure.
 
 ## Student Profile
-- **Python**: Good / comfortable
-- **C/C++**: Basic — actively learning
-- **Goal**: Master TinyML end-to-end for career growth
-- **Learning style**: Needs intuitive analogies, worked math examples, ASCII diagrams
-- **Pet peeves**: Don't rush to the next topic. Don't give long answers when a short one works.
+- **Python**: Proficient | **C/C++**: Beginner (learning) | **Goal**: Master TinyML end-to-end
+- **Learning style**: Intuitive analogies, worked math examples, ASCII diagrams
+- **Pet peeves**: Don't rush topics. Don't give long answers when short ones work.
 
 ## Code Style
-- Use type hints in Python
-- Use `tf_keras` (not `keras`) for all TensorFlow code (tfmot compatibility)
-- Follow existing project patterns (see `create_model.py` for reference)
-- Always explain WHY, not just HOW
+- Type hints required in Python
+- Use `tf_keras` (not `keras`) — tfmot compatibility
+- Follow existing patterns in `Phase_1/*.py`
+- Explain WHY, not just HOW
+
+## Agents
+Use `@orchestrator` as the entry point — it routes to the right specialist:
+- `@code-helper` — write, debug, review code
+- `@deep-explainer` — math, theory, diagrams, analogies
+- `@roadmap-manager` — progress tracking, next steps, validation
