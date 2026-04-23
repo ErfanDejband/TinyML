@@ -1714,21 +1714,6 @@ tf.uint8 / uint8_t (UNSIGNED):
 ✅ Include `<stdint.h>` (C) or `<cstdint>` (C++) to use them  
 
 ---
-  If bit 7 is 1 → negative number
-  11000000 in two's complement = -64
-
-
-**Formula:**
-```
-If value > 127:
-    signed_value = value - 256
-    
-Example: 0xC0 = 192
-         192 > 127, so:
-         -64 = 192 - 256 ✅
-```
-
----
 
 ##### How to Verify Your Model's Quantization Type
 
@@ -1918,11 +1903,11 @@ The **meaning** (int8 arithmetic) wraps around the **storage** (uint8 bytes)!
 
 ---
 
-**Next:** Continue to **Section 2.0.6: printf** to learn how to print these integer types in C++!
+**Next:** Continue to **Section 2.0.5: C++ Types** to learn about the type system, then **Section 2.0.6: printf** for printing!
 
 ---
 
-#### 2.0.6 printf: How Printing Works in C++
+#### 2.0.5 C++ Types and Fixed-Width Integers
 
 In Python, you just use numbers:
 ```python
@@ -2003,7 +1988,7 @@ size_t model_size = 3264;                         // Size type
 
 ---
 
-#### 2.0.5 printf: How Printing Works in C++
+#### 2.0.6 printf: How Printing Works in C++
 
 **Python's print (what you know):**
 ```python
@@ -3247,39 +3232,14 @@ Your model lives in Flash ROM (read-only, ~3.2 KB), but **running inference requ
 
 **Think of the arena as a parking lot with different zones:**
 
-```
-┌─────────────────────────────────────────────────────────┐
-│           TENSOR ARENA (10,000 bytes)                   │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
-│  Zone 1: INPUT TENSOR                                   │
-│    ┌──────────────────────────┐                         │
-│    │ Your 50×3 accelerometer  │                         │
-│    │ data (150 bytes)         │                         │
-│    └──────────────────────────┘                         │
-│                                                         │
-│  Zone 2: INTERMEDIATE TENSORS (Reusable!)               │
-│    ┌─────────────────────────────────────┐              │
-│    │ Conv1D output (48×8 = 384 bytes)    │              │
-│    │ MaxPool output (24×8 = 192 bytes)   │              │
-│    │ Flatten (same memory, just reshape) │              │
-│    └─────────────────────────────────────┘              │
-│      ↑                                                  │
-│      This space gets REUSED by Dense layers!            │
-│                                                         │
-│  Zone 3: OUTPUT TENSOR                                  │
-│    ┌──────────────┐                                     │
-│    │ Wave: -95    │                                     │
-│    │ Idle: 82     │ (2 bytes)                           │
-│    └──────────────┘                                     │
-│                                                         │
-│  Zone 4: BOOKKEEPING (TFLite Micro metadata)            │
-│    - Tensor descriptors                                 │
-│    - Shape information                                  │
-│    - Quantization params (scale, zero-point)            │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
-```
+| Zone | What's Stored | Size (Your Model) |
+|------|--------------|-------------------|
+| Input tensor | Your 50×3 accelerometer data | 150 bytes |
+| Intermediate tensors | Conv1D, MaxPool outputs (reusable!) | ~384 bytes peak |
+| Output tensor | Wave/Idle scores | 2 bytes |
+| Bookkeeping | Tensor descriptors, shapes, quant params | ~800 bytes |
+
+> 📖 **For the detailed byte-level memory map** showing exact offsets, reuse patterns, and scratch buffers, see **[Section 3.5: Visual Memory Map After Allocation](#35-allocatetensors--what-happens-under-the-hood)**.
 
 ---
 
@@ -3332,57 +3292,18 @@ interpreter.Invoke();  // All layers share the arena!
 
 #### Real Memory Layout for YOUR Model
 
-Let's trace what happens with your gesture recognition model:
+Let's trace what happens with your gesture recognition model. Here's a simplified view of arena reuse:
 
 ```
-Step-by-Step Arena Usage:
-
-STEP 1: Input Layer (50×3 int8)
-┌──────────────────────────────────────┐
-│ [0-149]: Input data (150 bytes)      │ ← You copy sensor data here
-│ [150-9999]: Available (9,850 bytes)  │
-└──────────────────────────────────────┘
-
-STEP 2: Conv1D (kernel=3, filters=8)
-┌──────────────────────────────────────┐
-│ [0-149]: Input (still needed)        │ ← Conv reads from here
-│ [150-533]: Conv output (384 bytes)   │ ← Conv writes here
-│ [534-9999]: Available (9,466 bytes)  │
-└──────────────────────────────────────┘
-
-STEP 3: MaxPooling1D (pool_size=2)
-┌──────────────────────────────────────┐
-│ [0-149]: Input (no longer needed!)   │ ← CAN BE REUSED NOW!
-│ [150-533]: Conv (no longer needed!)  │ ← CAN BE REUSED NOW!
-│ [534-725]: MaxPool out (192 bytes)   │ ← MaxPool writes here
-│ [726-9999]: Available (9,274 bytes)  │
-└──────────────────────────────────────┘
-
-STEP 4: Flatten (no memory needed, just pointer arithmetic)
-
-STEP 5: Dense(16) with ReLU
-┌──────────────────────────────────────┐
-│ [0-191]: Dense16 input (192 bytes)   │ ← REUSES old input space!
-│ [192-207]: Dense16 out (16 bytes)    │
-│ [208-9999]: Available (9,792 bytes)  │
-└──────────────────────────────────────┘
-
-STEP 6: Dense(2) with Softmax
-┌──────────────────────────────────────┐
-│ [0-15]: Dense16 (no longer needed)   │
-│ [16-17]: OUTPUT (2 bytes)            │ ← Your final prediction!
-│ [18-9999]: Available (9,982 bytes)   │
-└──────────────────────────────────────┘
+Simplified Arena Flow:
+  Input (150 B) → Conv1D (384 B) → MaxPool (192 B) → Dense16 (16 B) → Dense2 (2 B)
+                                                         ↑ reuses input space!
 
 Maximum simultaneous usage: ~600 bytes
-Allocated: 10,000 bytes (safety margin)
+Allocated: 10,000 bytes (large safety margin)
 ```
 
-**Why so much extra space?**
-- Safety margin for bookkeeping
-- Alignment requirements (some ops need 16-byte alignment)
-- Future model changes
-- Better safe than sorry on real hardware!
+> 📖 **For the complete step-by-step memory walkthrough** — including how Flash ROM weights interact with RAM activations and exact byte offsets — see **[Section 3.4: 🔥 The Magic: How Inference Works (Flash + RAM)](#34-how-big-should-the-arena-be-sizing-strategy)**.
 
 ---
 
@@ -4241,7 +4162,7 @@ void run_inference() {
 <details>
 <summary>Click for answer</summary>
 
-**Stack overflow! ⚠️**
+**Stack overflow!! ⚠️**
 
 The array is on the **stack** (local variable). Stack is typically only 2-4 KB, but this array needs 10 KB.
 
@@ -4629,44 +4550,16 @@ uint8_t tensor_arena[kTensorArenaSize];
 
 #### Real Example: Finding the Right Size
 
-**Iteration 1: Too Small**
-```cpp
-uint8_t tensor_arena[1000];  // Only 1 KB
+Start small and increase until `AllocateTensors()` succeeds:
 
-// Output:
-// ERROR: AllocateTensors() failed!
-// Arena too small: needs 1400, got 1000
+```
+Try 1000: FAILED (needs ~1400)
+Try 2000: FAILED (overhead higher than estimated)
+Try 3000: SUCCESS! (used 2847 bytes)
+→ Final: 4000 bytes (3000 + 33% safety margin)
 ```
 
-**Iteration 2: Still Too Small**
-```cpp
-uint8_t tensor_arena[2000];  // 2 KB
-
-// Output:
-// ERROR: AllocateTensors() failed!
-// Arena too small: needs 2100, got 2000
-// (Overhead was higher than estimated!)
-```
-
-**Iteration 3: Just Right**
-```cpp
-uint8_t tensor_arena[3000];  // 3 KB
-
-// Output:
-// ✅ AllocateTensors() succeeded!
-// Arena used: 2847 bytes
-// Arena free: 153 bytes
-```
-
-**Final: With Safety Margin**
-```cpp
-uint8_t tensor_arena[4000];  // 4 KB (3000 + 33% margin)
-
-// Output:
-// ✅ AllocateTensors() succeeded!
-// Arena used: 2847 bytes
-// Arena free: 1153 bytes
-```
+> 📖 **For the precise binary search technique** with C++ code to find the exact minimum, see **[Section 3.7: Technique 2 — Binary Search for Minimum Arena Size](#37-debugging-memory-allocation-failures)**.
 
 ---
 
@@ -4735,7 +4628,7 @@ interpreter.AllocateTensors();
 │ ARENA SIZE (RAM)                                 │
 │                                                  │
 │ uint8_t tensor_arena[10000];                     │
-│ Size: 10,000 bytes (BUT only ~3000 used!)       │
+│ Size: 10,000 bytes (BUT only ~3000 used!)        │
 │ Contains: Input, intermediate outputs, metadata  │
 │ Stored: RAM (read-write)                         │
 │ Lifetime: Entire program                         │
@@ -4900,17 +4793,1798 @@ uint8_t tensor_arena[4000];  // ✅ Production size
 
 ---
 
-**🎉 Section 3 (3.1-3.4) Complete!**
+<a name="35-allocatetensors--what-happens-under-the-hood"></a>
+### 3.5 `AllocateTensors()` — What Happens Under the Hood
+
+Now that you understand **what** the arena is and **how** to size it, let's peek inside to see what happens when you call `interpreter->AllocateTensors()`.
+
+---
+
+#### The Job Interview Analogy
+
+**Scenario:** You're a manager with a fixed-size office (the arena). You need to assign desks (memory) to employees (tensors) for a project.
+
+```
+Your office: 4,000 square feet (arena bytes)
+Employees: Input, Conv output, Pool output, Dense outputs (tensors)
+```
+
+**The allocation process mirrors what TFLite Micro does:**
+
+**Step 1: Survey (Analyze the model)**
+```
+Manager: "Let me see who needs a desk..."
+- Employee 1 (Input): Needs 150 sq ft
+- Employee 2 (Conv): Needs 384 sq ft
+- Employee 3 (Pool): Needs 192 sq ft
+- Employee 4 (Dense1): Needs 16 sq ft
+- Employee 5 (Dense2): Needs 2 sq ft
+```
+
+**Step 2: Timeline Analysis (Find reuse opportunities)**
+```
+Manager: "When does each person work?"
+- Input: Days 1-2 (then leaves)
+- Conv: Days 2-3 (needs Input's results, then leaves)
+- Pool: Days 3-4 (needs Conv's results, then leaves)
+- Dense1: Days 4-5 (needs Pool's results, then leaves)
+- Dense2: Days 5-6 (needs Dense1's results, gives final output)
+```
+
+**Key insight:** People who work at **different times** can share the same desk!
+
+**Step 3: Optimal Layout (Tetris packing)**
+```
+Manager: "I can reuse desks!"
+- Desk Area A (0-383 sq ft): Input (days 1-2), then Conv (days 2-3)
+- Desk Area B (384-575 sq ft): Pool (days 3-4)
+- Desk Area C (0-15 sq ft): Dense1 (days 4-5) ← REUSES Input's old space!
+- Desk Area D (16-17 sq ft): Dense2 (days 5-6)
+
+Total office space needed: ~576 sq ft (not 744 sq ft!)
+```
+
+**Step 4: Add Metadata Storage**
+```
+Manager: "I also need filing cabinets for employee records..."
+- Name tags, schedules, contact info
+- +800 sq ft for cabinets
+
+Total: 576 + 800 = 1,376 sq ft
+```
+
+**Step 5: Safety Check**
+```
+Manager: "Do I have enough office space?"
+Office available: 4,000 sq ft
+Office needed: 1,376 sq ft
+✅ SUCCESS! Allocate desks!
+```
+
+---
+
+#### What TFLite Micro Actually Does
+
+Here's the **real process** when you call `interpreter->AllocateTensors()`:
+
+```cpp
+// You wrote this:
+tflite::MicroInterpreter interpreter(model, resolver, tensor_arena, 4000, error_reporter);
+interpreter.AllocateTensors();  // ← What happens here?
+```
+
+**Internally (simplified C++ pseudo-code):**
+
+```cpp
+// Step 1: Parse the model
+//   - Read FlatBuffer offsets (Phase 2 knowledge!)
+//   - Extract tensor shapes, types, operator sequence
+
+void MicroInterpreter::AllocateTensors() {
+    // Step 2: Calculate each tensor's size
+    tensors_[0].bytes = 1 * 50 * 3 * sizeof(int8_t);  // Input: 150
+    tensors_[1].bytes = 1 * 48 * 8 * sizeof(int8_t);  // Conv: 384
+    tensors_[2].bytes = 1 * 24 * 8 * sizeof(int8_t);  // Pool: 192
+    tensors_[3].bytes = 1 * 16 * sizeof(int8_t);      // Dense1: 16
+    tensors_[4].bytes = 1 * 2 * sizeof(int8_t);       // Dense2: 2
+    
+    // Step 3: Analyze execution order (topological sort)
+    //   - Which tensor is used when?
+    //   - Which tensors can share memory?
+    
+    // Execution plan:
+    // Op 0 (Conv1D): Reads tensor[0], writes tensor[1]
+    // Op 1 (MaxPool): Reads tensor[1], writes tensor[2]
+    // Op 2 (Dense): Reads tensor[2], writes tensor[3]
+    // Op 3 (Dense): Reads tensor[3], writes tensor[4]
+    
+    // Step 4: Lifetime analysis
+    lifetime[0] = {start: Op0, end: Op1};  // Input dies after Conv reads it
+    lifetime[1] = {start: Op0, end: Op2};  // Conv dies after Pool reads it
+    lifetime[2] = {start: Op1, end: Op3};  // Pool dies after Dense1 reads it
+    lifetime[3] = {start: Op2, end: Op4};  // Dense1 dies after Dense2 reads it
+    lifetime[4] = {start: Op3, end: END};  // Dense2 is final output
+    
+    // Step 5: Memory reuse (greedy allocation like Tetris)
+    int arena_offset = 0;
+    
+    for (int i = 0; i < num_tensors; i++) {
+        // Can this tensor reuse memory from a dead tensor?
+        int reuse_offset = FindReuseOpportunity(i, lifetime);
+        
+        if (reuse_offset >= 0) {
+            tensors_[i].data = arena_ + reuse_offset;  // Reuse!
+        } else {
+            tensors_[i].data = arena_ + arena_offset;  // New allocation
+            arena_offset += tensors_[i].bytes;
+        }
+        
+        // Align to 16 bytes for performance
+        arena_offset = (arena_offset + 15) & ~15;
+    }
+    
+    // Step 6: Add scratch buffers (operator temp storage)
+    arena_offset += 800;  // Conv1D needs temp buffers, etc.
+    
+    // Step 7: Final check
+    if (arena_offset > arena_size_) {
+        error_reporter->Report("Arena too small! Need %d, have %d",
+                               arena_offset, arena_size_);
+        return kTfLiteError;
+    }
+    
+    return kTfLiteOk;  // ✅ Success!
+}
+```
+
+---
+
+#### Visual Memory Map After Allocation
+
+**For YOUR specific model:**
+
+```
+TENSOR ARENA (4,000 bytes total)
+┌─────────────────────────────────────────────────────────────┐
+│ Byte 0-149:   Input tensor (50×3)                          │
+│               [Active during Conv1D, then FREED]            │
+├─────────────────────────────────────────────────────────────┤
+│ Byte 0-15:    Dense1 output (16) ← REUSES Input space!     │
+│               [Active during Dense2, then FREED]            │
+├─────────────────────────────────────────────────────────────┤
+│ Byte 16-17:   Dense2 output (2) ← Final output             │
+│               [Active until you read it]                    │
+├─────────────────────────────────────────────────────────────┤
+│ Byte 150-533: Conv1D output (48×8 = 384 bytes)             │
+│               [Active during MaxPool, then FREED]           │
+├─────────────────────────────────────────────────────────────┤
+│ Byte 534-725: MaxPool output (24×8 = 192 bytes)            │
+│               [Active during Dense1, then FREED]            │
+├─────────────────────────────────────────────────────────────┤
+│ Byte 726-1525: Scratch buffers (Conv1D temp storage)       │
+│                (~800 bytes for internal ops)                │
+├─────────────────────────────────────────────────────────────┤
+│ Byte 1526-3999: UNUSED (safety margin)                     │
+│                 [Reserved for future use]                   │
+└─────────────────────────────────────────────────────────────┘
+
+Peak usage: ~1,526 bytes
+Allocated: 4,000 bytes
+Efficiency: 38% used, 62% safety buffer
+```
+
+**Notice:**
+- **Byte 0-149** is used TWICE (Input, then later Dense1)!
+- **Non-overlapping lifetimes** = safe reuse
+- **Most of the arena is unused** = comfortable safety margin
+
+---
+
+#### The Tetris Game Visualization
+
+**Think of allocation as a Tetris game where blocks fall and disappear:**
+
+```
+TIME →
+════════════════════════════════════════════════════════════
+Tick 0 (Load Input):
+[████████ Input 150B ████████]
+│                            │
+└─ Bytes 0-149              └─ Rest of arena empty
+
+Tick 1 (Conv1D):
+[████████ Input 150B ████████][█████████████ Conv 384B █████████████]
+│                            │
+│                            └─ Bytes 150-533
+└─ Input still alive (Conv reads it)
+
+Tick 2 (Input dies, Conv output ready):
+
+[:::::::: FREED ::::::::::][█████████████ Conv 384B █████████████]
+│                           │
+└─ Bytes 0-149 now FREE!    └─ Conv output at 150-533
+
+Tick 3 (MaxPool):
+
+[:::::::: FREED :::::::::::][█████████████ Conv 384B █████████████][██████ Pool 192B ██████]
+                            │                                       │
+                            └─ Conv still alive                    └─ Bytes 534-725
+
+Tick 4 (Conv dies):
+
+[:::::::: FREED::::::::::::][██████ Pool 192B ██████]
+│                           │
+└─ 0-533 now available!     └─ Pool output at 534-725
+
+Tick 5 (Dense1 reuses byte 0-15!):
+[█████Dense1 16B █████][:::: FREED ::::::::][██████ Pool 192B ██████]
+│                       │
+│                       └─ Bytes 16-533 still free
+└─ Bytes 0-15 reused!
+
+Tick 6 (Dense2):
+[█ Dense1 16B █][D2 2B][:::::::::::::: MOSTLY EMPTY ::::::::::::::]
+│               │
+│               └─ Bytes 16-17 (final output)
+└─ Bytes 0-15 (Dense1)
+
+Tick 7 (Read output, inference done):
+[:::::::: FREED :::::::::::][D2 2B][:::::::::::: ALL FREE :::::::::::]
+                            │
+                            └─ Only output survives
+```
+
+**Key insight:** At any given time, only a **fraction** of the arena is occupied!
+
+---
+
+#### Python vs C++ Memory Management
+
+| **Python (TensorFlow/Keras)** | **C++ (TFLite Micro)** |
+|-------------------------------|------------------------|
+| Automatic allocation (runtime) | Manual pre-allocation (compile-time) |
+| Garbage collector frees memory | Manual reuse via arena |
+| Can allocate more if needed | Fixed size, fails if too small |
+| Fragmentation possible | No fragmentation (linear buffer) |
+| Overhead: ~kilobytes per tensor | Overhead: ~bytes per tensor |
+| Unpredictable memory usage | Predictable memory usage |
+
+**Python example:**
+```python
+# You never think about memory management!
+model.predict(input_data)
+# Tensors allocated, used, freed automatically
+```
+
+**C++ example:**
+```cpp
+// You must pre-allocate workspace
+uint8_t tensor_arena[4000];  // ← Must decide size upfront
+interpreter.AllocateTensors();  // ← Fails if too small!
+```
+
+---
+
+#### Why This Matters for Embedded
+
+**Desktop/Server (Python):**
+- RAM: Gigabytes available
+- Strategy: Allocate freely, let OS manage
+- Trade-off: Accept some waste for convenience
+
+**Microcontroller (C++):**
+- RAM: Kilobytes available (8 KB for your chip!)
+- Strategy: Pre-allocate precisely, reuse aggressively
+- Trade-off: Manual effort for zero waste
+
+**Analogy:**
+- **Python** = Buffet restaurant (take what you want, waste is okay)
+- **C++ embedded** = Rationed supplies (every byte counts!)
+
+---
+
+### ✅ Quick Check — AllocateTensors() Edition
+
+**Q1:** If your model has 5 tensors totaling 744 bytes, why does the arena need ~1,400 bytes?
+
+<details>
+<summary>Click for answer</summary>
+
+**Three reasons:**
+
+1. **Scratch buffers** (~800 bytes)
+   - Conv1D needs temp storage for im2col operation
+   - Operators need internal workspace
+   
+2. **Alignment padding** (~50 bytes)
+   - Each tensor aligned to 16-byte boundaries
+   - Wastes a few bytes per tensor for performance
+   
+3. **Tensor metadata** (~50-100 bytes)
+   - Shape arrays `[1, 50, 3]`
+   - Quantization params (scale, zero-point)
+   - Type information (int8_t)
+
+**Total:** 744 (tensors) + 800 (scratch) + 100 (overhead) = **1,644 bytes minimum**
+
+**Recommendation:** Add 2-3x safety → **4,000 bytes**
+
+</details>
+
+**Q2:** Can two tensors with overlapping lifetimes share the same memory?
+
+<details>
+<summary>Click for answer</summary>
+
+**NO! ❌**
+
+**Example:**
+```
+Conv output: Lives from Op1 to Op2
+Pool output: Lives from Op2 to Op3
+```
+
+At the boundary (Op2), **both** are alive:
+- Op2 (MaxPool) **reads** Conv output
+- Op2 **writes** Pool output
+
+If they shared memory, Pool would **overwrite** Conv while it's being read! 💥
+
+**Only tensors with NON-overlapping lifetimes can share memory.**
+
+</details>
+
+**Q3:** What happens if `AllocateTensors()` fails?
+
+<details>
+<summary>Click for answer</summary>
+
+**The interpreter will tell you exactly what's wrong:**
+
+```
+ERROR: Tensor arena is too small.
+Arena: 2000 bytes
+Required: 2847 bytes
+Difference: 847 bytes short
+```
+
+**Your options:**
+
+1. **Increase arena size** (easiest)
+   ```cpp
+   uint8_t tensor_arena[3000];  // Bump it up
+   ```
+
+2. **Simplify model** (if arena is constrained)
+   - Reduce input size
+   - Fewer filters
+   - Smaller dense layers
+
+3. **Check for bugs**
+   - Did you pass correct `arena_size` parameter?
+   - Is arena actually allocated in RAM?
+
+**Best practice:** Start with generous arena (10 KB during learning), optimize later.
+
+</details>
+
+---
+
+<a name="36-common-errors-arena-too-small-alignment-issues"></a>
+### 3.6 Common Errors: Arena Too Small, Alignment Issues
+
+Now that you understand how allocation works, let's troubleshoot common problems!
+
+---
+
+#### Error 1: "Tensor arena is too small"
+
+**The most common error you'll see:**
+
+```
+ERROR: Tensor arena is too small.
+Arena: 1000 bytes
+Required: 2847 bytes
+```
+
+**Why it happens:**
+- You underestimated memory needs
+- Model complexity exceeds arena size
+- Operators need more scratch buffers than expected
+
+**How to fix:**
+
+**Solution 1: Increase arena size (recommended)**
+```cpp
+// Before (too small):
+uint8_t tensor_arena[1000];
+
+// After (fixed):
+uint8_t tensor_arena[3000];  // Round up from 2847
+```
+
+**Solution 2: Binary search for optimal size**
+```cpp
+// Try 1:
+uint8_t tensor_arena[2000];  // Too small
+
+// Try 2:
+uint8_t tensor_arena[2500];  // Still too small
+
+// Try 3:
+uint8_t tensor_arena[2850];  // Works! ✅
+
+// Production:
+uint8_t tensor_arena[3500];  // +20% safety margin
+```
+
+**Solution 3: Use dynamic sizing (desktop only)**
+```cpp
+// NOT for embedded! But useful for learning:
+std::vector<uint8_t> tensor_arena(10000);  // Generous
+// ...then optimize down based on actual usage
+```
+
+---
+
+#### Error 2: Alignment Issues
+
+**Symptoms:**
+- Code compiles but crashes during inference
+- "Bus error" or "Unaligned access" on hardware
+- Works on desktop, fails on ARM Cortex-M
+
+**Example broken code:**
+```cpp
+// ❌ BAD: No alignment specified
+uint8_t tensor_arena[4000];
+
+// ❌ BAD: Alignment after type
+extern alignas(16) const unsigned char model_data[];
+
+// ❌ BAD: Heap allocation (no alignment guarantee)
+uint8_t* tensor_arena = (uint8_t*)malloc(4000);
+```
+
+**Fixed code:**
+```cpp
+// ✅ GOOD: Properly aligned static array
+alignas(16) uint8_t tensor_arena[4000];
+
+// ✅ GOOD: Alignment before storage class
+alignas(16) extern const unsigned char model_data[];
+
+// ✅ GOOD (if you must use heap): Aligned allocation
+#include <cstdlib>
+void* ptr = nullptr;
+posix_memalign(&ptr, 16, 4000);
+uint8_t* tensor_arena = (uint8_t*)ptr;
+```
+
+**Why 16-byte alignment?**
+
+Modern CPUs load data in chunks:
+```
+CPU reads memory in 16-byte blocks:
+[0-15][16-31][32-47][48-63]...
+
+✅ Aligned read (fast, 1 operation):
+Address 0: ██████████████████ (load bytes 0-15 in one go)
+
+❌ Unaligned read (slow, 2 operations):
+Address 5: :::::██████████████ (load 0-15, then 16-31, then combine)
+           ↑ Wastes half of first block
+           ↑ Needs second load
+```
+
+**Performance impact:**
+- **Aligned:** 1 CPU cycle
+- **Unaligned:** 2-3 CPU cycles + extra instructions
+- **On some ARM chips:** CRASH! 💥 (unaligned access forbidden)
+
+---
+
+#### Error 3: Stack Overflow (Arena on Stack)
+
+**Symptom:**
+```cpp
+void run_inference() {
+    uint8_t tensor_arena[4000];  // ❌ Local variable = STACK!
+    // ...program crashes silently
+}
+```
+
+**Why it fails:**
+- Stack is typically only 2-4 KB
+- 4 KB array overflows the stack
+- Corrupts return addresses → crash
+
+**The fix:**
+```cpp
+// ✅ Option 1: Static inside function
+void run_inference() {
+    static alignas(16) uint8_t tensor_arena[4000];
+    // ...
+}
+
+// ✅ Option 2: Global variable
+alignas(16) uint8_t tensor_arena[4000];
+
+void run_inference() {
+    // ...
+}
+```
+
+**How to detect:**
+- Desktop: Usually crashes with "Segmentation fault"
+- Embedded: Silent crash or random behavior
+- Debugger shows corrupted stack frame
+
+---
+
+#### Error 4: Not Checking Return Value
+
+**Bad code:**
+```cpp
+// ❌ Ignoring errors
+interpreter.AllocateTensors();
+interpreter.Invoke();  // Might crash if allocation failed!
+```
+
+**Good code:**
+```cpp
+// ✅ Check every step
+if (interpreter.AllocateTensors() != kTfLiteOk) {
+    error_reporter->Report("AllocateTensors() failed!");
+    return;
+}
+
+if (interpreter.Invoke() != kTfLiteOk) {
+    error_reporter->Report("Invoke() failed!");
+    return;
+}
+```
+
+**Why it matters:**
+- `AllocateTensors()` can fail (arena too small)
+- `Invoke()` can fail (invalid input, operator error)
+- Without checks, you'll chase phantom bugs!
+
+---
+
+#### Error 5: Reusing Arena for Multiple Models
+
+**Broken code:**
+```cpp
+alignas(16) uint8_t shared_arena[4000];
+
+// Model 1
+tflite::MicroInterpreter interp1(model1, resolver, shared_arena, 4000);
+interp1.AllocateTensors();
+interp1.Invoke();
+
+// Model 2 (REUSES same arena)
+tflite::MicroInterpreter interp2(model2, resolver, shared_arena, 4000);
+interp2.AllocateTensors();  // ❌ Overwrites model1's allocations!
+interp2.Invoke();
+
+// Try to use model1 again:
+interp1.Invoke();  // 💥 CORRUPTED! Arena was overwritten!
+```
+
+**The fix:**
+
+**Option 1: Separate arenas**
+```cpp
+alignas(16) uint8_t arena1[4000];
+alignas(16) uint8_t arena2[4000];
+
+tflite::MicroInterpreter interp1(model1, resolver, arena1, 4000);
+tflite::MicroInterpreter interp2(model2, resolver, arena2, 4000);
+```
+
+**Option 2: Sequential use (safe reuse)**
+```cpp
+alignas(16) uint8_t arena[4000];
+
+// Use model 1
+{
+    tflite::MicroInterpreter interp1(model1, resolver, arena, 4000);
+    interp1.AllocateTensors();
+    interp1.Invoke();
+}  // ← interp1 destroyed, arena safe to reuse
+
+// Now use model 2
+{
+    tflite::MicroInterpreter interp2(model2, resolver, arena, 4000);
+    interp2.AllocateTensors();
+    interp2.Invoke();
+}
+```
+
+---
+
+#### Debugging Checklist
+
+**When things go wrong, check:**
+
+- [ ] **Arena size:** Is it ≥ required size from error message?
+- [ ] **Alignment:** Did you use `alignas(16)` on arena?
+- [ ] **Storage:** Is arena `static` or global (NOT local on stack)?
+- [ ] **Return values:** Are you checking `AllocateTensors()` return status?
+- [ ] **RAM budget:** Does arena fit in your chip's RAM?
+- [ ] **Model validity:** Is model file correct and complete?
+- [ ] **Op registration:** Are all required ops registered in resolver?
+
+---
+
+<a name="37-debugging-memory-allocation-failures"></a>
+### 3.7 Debugging Memory Allocation Failures
+
+When `AllocateTensors()` fails or inference crashes, use these techniques to debug!
+
+---
+
+#### Technique 1: Enable Verbose Error Reporting
+
+**Basic error reporter:**
+```cpp
+tflite::MicroErrorReporter micro_error_reporter;
+tflite::ErrorReporter* error_reporter = &micro_error_reporter;
+```
+
+**What you see:**
+```
+ERROR: Tensor arena is too small.
+```
+
+**Enhanced debugging (add printf tracking):**
+```cpp
+// Add this before AllocateTensors():
+printf("Arena address: %p\n", tensor_arena);
+printf("Arena size: %d bytes\n", sizeof(tensor_arena));
+printf("Model size: %u bytes\n", model_data_len);
+
+if (interpreter.AllocateTensors() != kTfLiteOk) {
+    printf("❌ AllocateTensors() FAILED!\n");
+    return;
+}
+printf("✅ AllocateTensors() SUCCESS!\n");
+```
+
+**Enhanced output:**
+```
+Arena address: 0x20000100
+Arena size: 4000 bytes
+Model size: 3264 bytes
+✅ AllocateTensors() SUCCESS!
+```
+
+---
+
+#### Technique 2: Binary Search for Minimum Arena Size
+
+**Goal:** Find the smallest arena that works.
+
+```cpp
+// Start with a guess
+#define ARENA_SIZE 2000
+
+alignas(16) uint8_t tensor_arena[ARENA_SIZE];
+
+// Try allocation
+if (interpreter.AllocateTensors() != kTfLiteOk) {
+    printf("FAILED at %d bytes\n", ARENA_SIZE);
+    // Increase ARENA_SIZE and recompile
+} else {
+    printf("SUCCESS at %d bytes\n", ARENA_SIZE);
+    // Decrease ARENA_SIZE and recompile
+}
+```
+
+**Binary search steps:**
+```
+Try 2000: FAILED
+Try 3000: FAILED
+Try 4000: SUCCESS ✅
+Try 3500: SUCCESS ✅
+Try 3250: FAILED
+Try 3375: FAILED
+Try 3437: SUCCESS ✅
+Try 3406: FAILED
+Try 3421: SUCCESS ✅
+→ Minimum: ~3421 bytes
+→ Production: 3421 × 1.2 = ~4,100 bytes
+```
+
+---
+
+#### Technique 3: Measure Actual Usage (Advanced)
+
+**TFLite Micro exposes internal arena usage:**
+
+```cpp
+// After successful AllocateTensors():
+size_t arena_used_bytes = interpreter.arena_used_bytes();
+
+printf("Arena allocated: %d bytes\n", sizeof(tensor_arena));
+printf("Arena actually used: %zu bytes\n", arena_used_bytes);
+printf("Arena wasted: %d bytes\n", sizeof(tensor_arena) - arena_used_bytes);
+printf("Efficiency: %.1f%%\n", 100.0 * arena_used_bytes / sizeof(tensor_arena));
+```
+
+**Example output:**
+```
+Arena allocated: 4000 bytes
+Arena actually used: 1526 bytes
+Arena wasted: 2474 bytes
+Efficiency: 38.2%
+```
+
+**Interpretation:**
+- **38% efficiency** = lots of safety margin (good for development!)
+- **Production optimization:** Could reduce to ~2,000 bytes (1526 × 1.3)
+
+---
+
+#### Technique 4: Inspect Individual Tensor Allocations
+
+**Print each tensor's info:**
+
+```cpp
+// After AllocateTensors()
+int num_tensors = interpreter.tensors_size();
+printf("\nTensor allocations:\n");
+
+for (int i = 0; i < num_tensors; i++) {
+    TfLiteTensor* tensor = interpreter.tensor(i);
+    printf("Tensor %d: %s\n", i, tensor->name);
+    printf("  Type: %s\n", TfLiteTypeGetName(tensor->type));
+    printf("  Bytes: %zu\n", tensor->bytes);
+    printf("  Dims: [");
+    for (int d = 0; d < tensor->dims->size; d++) {
+        printf("%d%s", tensor->dims->data[d], 
+               d < tensor->dims->size - 1 ? ", " : "");
+    }
+    printf("]\n");
+    printf("  Address: %p (offset: %td)\n", 
+           tensor->data.raw, 
+           (uint8_t*)tensor->data.raw - tensor_arena);
+    printf("\n");
+}
+```
+
+**Example output for YOUR model:**
+```
+Tensor allocations:
+
+Tensor 0: serving_default_input:0
+  Type: INT8
+  Bytes: 150
+  Dims: [1, 50, 3]
+  Address: 0x20000100 (offset: 0)
+
+Tensor 1: conv1d/Relu:0
+  Type: INT8
+  Bytes: 384
+  Dims: [1, 48, 8]
+  Address: 0x20000196 (offset: 150)
+
+Tensor 2: max_pooling1d/MaxPool:0
+  Type: INT8
+  Bytes: 192
+  Dims: [1, 24, 8]
+  Address: 0x20000316 (offset: 534)
+
+Tensor 3: dense/Relu:0
+  Type: INT8
+  Bytes: 16
+  Dims: [1, 16]
+  Address: 0x20000100 (offset: 0)  ← REUSED address!
+
+Tensor 4: dense_1/MatMul:0
+  Type: INT8
+  Bytes: 2
+  Dims: [1, 2]
+  Address: 0x20000110 (offset: 16)
+```
+
+**Key insights from output:**
+- **Tensor 3 (offset 0)** reuses the same address as Tensor 0!
+- Memory is being reused, just as we predicted!
+
+---
+
+#### Technique 5: Check Alignment with Assertions
+
+**Add compile-time checks:**
+
+```cpp
+#include <cassert>
+
+// Check arena alignment
+static_assert(alignof(tensor_arena) >= 16, "Arena must be 16-byte aligned!");
+
+// Check size is power of 2 (optional, but common practice)
+static_assert((sizeof(tensor_arena) & (sizeof(tensor_arena) - 1)) == 0 ||
+              sizeof(tensor_arena) % 1000 == 0, 
+              "Arena size should be power of 2 or multiple of 1000");
+
+// Runtime check
+assert(((uintptr_t)tensor_arena & 0xF) == 0);  // Verify 16-byte alignment
+printf("✅ Arena is properly aligned at: %p\n", tensor_arena);
+```
+
+---
+
+#### Technique 6: Visualize Memory Layout
+
+**Create a memory map visualization:**
+
+```cpp
+void print_memory_map(uint8_t* arena_start, size_t arena_size) {
+    printf("\nMEMORY MAP:\n");
+    printf("┌");
+    for (int i = 0; i < 60; i++) printf("─");
+    printf("┐\n");
+    
+    int num_tensors = interpreter.tensors_size();
+    for (int i = 0; i < num_tensors; i++) {
+        TfLiteTensor* tensor = interpreter.tensor(i);
+        size_t offset = (uint8_t*)tensor->data.raw - arena_start;
+        size_t end = offset + tensor->bytes;
+        
+        printf("│ Tensor %d [%4zu-%4zu]: %s (%zu bytes)\n", 
+               i, offset, end, tensor->name, tensor->bytes);
+    }
+    
+    printf("├");
+    for (int i = 0; i < 60; i++) printf("─");
+    printf("┤\n");
+    
+    size_t used = interpreter.arena_used_bytes();
+    printf("│ Used: %zu / %zu bytes (%.1f%%)\n", 
+           used, arena_size, 100.0 * used / arena_size);
+    
+    printf("└");
+    for (int i = 0; i < 60; i++) printf("─");
+    printf("┘\n");
+}
+```
+
+---
+
+#### Common Failure Patterns
+
+**Pattern 1: Off-by-one errors**
+```cpp
+// ❌ Wrong: Error says need 2847, you allocate exactly 2847
+uint8_t tensor_arena[2847];  // Might fail due to alignment!
+
+// ✅ Right: Round up to next multiple of 16
+uint8_t tensor_arena[2848];  // 2847 → 2848 (divisible by 16)
+```
+
+**Pattern 2: Model vs Arena confusion**
+```cpp
+// ❌ Wrong: Using model size for arena
+uint8_t tensor_arena[3264];  // This is model size, not arena size!
+
+// ✅ Right: Arena is 2-3x model size
+uint8_t tensor_arena[10000];  // Proper workspace size
+```
+
+**Pattern 3: Forgetting safety margin**
+```cpp
+// ❌ Risky: Minimum size from error message
+// Error: "Required: 2847 bytes"
+uint8_t tensor_arena[2850];  // Barely works
+
+// ✅ Safe: Add 20-30% margin
+uint8_t tensor_arena[3500];  // 2850 × 1.23 ≈ 3500
+```
+
+---
+
+### ✅ Quick Check — Debugging Edition
+
+**Q1:** Your code works on desktop but crashes on Arduino. What's likely wrong?
+
+<details>
+<summary>Click for answer</summary>
+
+**Two most common causes:**
+
+1. **Arena on stack** (stack overflow)
+   ```cpp
+   void setup() {
+       uint8_t tensor_arena[4000];  // ❌ Stack is tiny on Arduino!
+       // ...
+   }
+   ```
+   **Fix:** Use `static` or global
+   ```cpp
+   static alignas(16) uint8_t tensor_arena[4000];  // ✅
+   ```
+
+2. **Alignment crash** (ARM doesn't forgive unaligned access)
+   ```cpp
+   uint8_t tensor_arena[4000];  // ❌ No alignas!
+   ```
+   **Fix:** Add alignment
+   ```cpp
+   alignas(16) uint8_t tensor_arena[4000];  // ✅
+   ```
+
+</details>
+
+**Q2:** You get "Arena too small: need 2847" but have 4000 bytes. What's wrong?
+
+<details>
+<summary>Click for answer</summary>
+
+**Possible causes:**
+
+1. **Passing wrong size to constructor**
+   ```cpp
+   uint8_t tensor_arena[4000];
+   MicroInterpreter interpreter(model, resolver, 
+       tensor_arena, 2000);  // ❌ Wrong size parameter!
+   ```
+
+2. **Using sizeof() on pointer**
+   ```cpp
+   uint8_t* tensor_arena = allocate_arena();
+   MicroInterpreter interpreter(model, resolver,
+       tensor_arena, sizeof(tensor_arena));  // ❌ sizeof(pointer) = 4 or 8!
+   ```
+
+3. **Two interpreters sharing arena simultaneously**
+   ```cpp
+   MicroInterpreter interp1(model1, resolver, arena, 4000);
+   MicroInterpreter interp2(model2, resolver, arena, 4000);
+   // ❌ Both try to use same arena!
+   ```
+
+</details>
+
+---
+
+**🎉 Section 3 Complete!**
 
 You now understand:
-- ✅ What a tensor arena is (reusable workspace)
-- ✅ Where it lives (Static RAM, not Stack or Heap)
-- ✅ Why static byte arrays (predictable, reliable, fast)
-- ✅ How to size it (calculation + safety margin + trial-and-error)
+- ✅ What tensor arenas are (3.1)
+- ✅ Memory types: Stack/Heap/Static (3.2)
+- ✅ Why static byte arrays (3.3)
+- ✅ How to size arenas (3.4)
+- ✅ What AllocateTensors() does (3.5)
+- ✅ Common errors and fixes (3.6)
+- ✅ Debugging techniques (3.7)
 
-**Next sections (3.5-3.7):** Deeper dives into AllocateTensors(), common errors, and debugging techniques.
+**Next up:** Section 4 — The Op Resolver! 🚀
 
-**Ready to continue?** Or take a break and practice what you've learned! 🚀
+---
+
+<a name="4-the-op-resolver--registering-operations"></a>
+## 4. The Op Resolver — Registering Operations
+
+<a name="41-what-is-an-opresolver"></a>
+### 4.1 What is an OpResolver?
+
+Now that you have memory (the arena), you need to tell TFLite Micro **how to execute each operation** in your model.
+
+---
+
+#### The Plugin System Analogy
+
+**Imagine your model is a recipe:**
+
+```
+Recipe: Wave Detection Model
+─────────────────────────────
+1. Take input (50×3 array)
+2. Apply Conv1D filter
+3. Run MaxPooling
+4. Flatten the result
+5. Apply Dense layer
+6. Apply another Dense layer
+7. Return prediction (Wave or Idle)
+```
+
+**The problem:** TFLite Micro doesn't automatically know **how** to do these operations!
+
+- **Conv1D**: What algorithm? How to handle padding?
+- **MaxPooling**: What pooling strategy?
+- **Dense**: Matrix multiplication? Activation function?
+
+**Solution:** The **OpResolver** is like a **plugin registry** that says:
+
+```
+"When you see Conv1D in the model → use THIS C++ function"
+"When you see MaxPooling → use THIS C++ function"
+"When you see Dense → use THIS C++ function"
+```
+
+---
+
+#### Python vs C++ — The Key Difference
+
+**Python (Keras/TensorFlow):**
+```python
+# All operations built-in!
+model = Sequential([
+    Conv1D(8, 3),         # ← TensorFlow knows how to Conv1D
+    MaxPooling1D(2),      # ← TensorFlow knows how to MaxPool
+    Dense(16),            # ← TensorFlow knows how to Dense
+])
+
+# You never register operations — they just work!
+```
+
+**C++ (TFLite Micro):**
+```cpp
+// MUST explicitly register each operation!
+tflite::MicroMutableOpResolver<5> resolver;  // ← Plugin system
+
+resolver.AddConv2D();        // ← Register Conv1D/Conv2D handler
+resolver.AddMaxPool2D();     // ← Register MaxPool handler
+resolver.AddFullyConnected(); // ← Register Dense handler
+resolver.AddReshape();       // ← Register Flatten handler
+resolver.AddSoftmax();       // ← Register Softmax handler
+
+// NOW TFLite Micro knows how to execute your model!
+```
+
+**Why this extra work?**
+
+**Embedded code size matters!**
+
+```
+❌ Including ALL ops (AllOpsResolver):
+   Code size: ~250 KB
+   Includes: Conv1D, Conv2D, LSTM, Attention, 100+ operations
+   Problem: Doesn't fit on 256 KB Flash chips!
+
+✅ Including ONLY your ops (MicroMutableOpResolver):
+   Code size: ~30 KB
+   Includes: Conv2D, MaxPool2D, FullyConnected, Reshape, Softmax
+   Result: Fits easily! ✅
+```
+
+---
+
+#### How the OpResolver Works Internally
+
+**Step 1: Model parsing** (happens during interpreter setup)
+```
+TFLite Micro reads your model FlatBuffer:
+┌────────────────────────────────────┐
+│ Operator 0: Type = CONV_2D        │ ← "I need a Conv2D handler!"
+│ Operator 1: Type = MAX_POOL_2D    │ ← "I need a MaxPool handler!"
+│ Operator 2: Type = RESHAPE        │ ← "I need a Reshape handler!"
+│ Operator 3: Type = FULLY_CONNECTED│ ← "I need a FullyConnected handler!"
+│ Operator 4: Type = SOFTMAX        │ ← "I need a Softmax handler!"
+└────────────────────────────────────┘
+```
+
+**Step 2: OpResolver lookup**
+```
+For each operator in model:
+    op_type = model.operators[i].type
+    handler = resolver.FindOp(op_type)  // ← Lookup!
+    
+    if (handler == nullptr) {
+        ERROR("Unsupported op: CONV_2D")  // ← Not registered!
+        return FAIL
+    }
+    
+    registered_ops[i] = handler  // ← Save for inference
+```
+
+**Step 3: During inference** (`Invoke()`)
+```
+For each operator:
+    handler = registered_ops[i]
+    handler.Invoke(input_tensor, output_tensor, params)
+    // ← Calls the actual C++ implementation!
+```
+
+---
+
+#### Visual Explanation
+
+```
+YOUR MODEL (FlatBuffer)          OP RESOLVER (Registry)
+┌─────────────────────┐          ┌──────────────────────────┐
+│ Op 0: CONV_2D       │─────────>│ CONV_2D → conv2d_impl()  │
+│ Op 1: MAX_POOL_2D   │─────────>│ MAX_POOL_2D → pool_impl()│
+│ Op 2: RESHAPE       │─────────>│ RESHAPE → reshape_impl() │
+│ Op 3: FULLY_CONNECTED│────────>│ FULLY_CONNECTED → dense()│
+│ Op 4: SOFTMAX       │─────────>│ SOFTMAX → softmax_impl() │
+└─────────────────────┘          └──────────────────────────┘
+                                            │
+                                            ↓
+                               Actual C++ implementations
+                               (compiled into your binary)
+```
+
+**If you forget to register an op:**
+
+```
+YOUR MODEL                     OP RESOLVER
+┌─────────────────────┐        ┌──────────────────────────┐
+│ Op 3: FULLY_CONNECTED│───X───>│ (not registered!)        │
+└─────────────────────┘        └──────────────────────────┘
+                                            │
+                                            ↓
+                               ❌ ERROR: "Unsupported op!"
+```
+
+---
+
+<a name="42-allopsresolver-vs-micromutableopresolver"></a>
+### 4.2 AllOpsResolver vs MicroMutableOpResolver
+
+TFLite Micro offers two ways to register operations:
+
+---
+
+#### Option 1: `AllOpsResolver` (Easy but Bloated)
+
+**What it does:** Registers EVERY operation TFLite Micro supports (~100+ ops).
+
+**Code:**
+```cpp
+#include "tensorflow/lite/micro/all_ops_resolver.h"
+
+tflite::AllOpsResolver resolver;  // ← One line, done!
+```
+
+**Pros:**
+- ✅ Super easy — one line of code
+- ✅ Guaranteed to work with any model
+- ✅ Great for prototyping
+
+**Cons:**
+- ❌ Binary size: ~200-300 KB (!!!)
+- ❌ Doesn't fit on small chips (your target: 256 KB Flash)
+- ❌ Wastes memory on unused operations
+
+**When to use:**
+- **Desktop development** (testing on PC)
+- **Initial prototyping** (verify model works)
+- **Unlimited Flash** (rare in embedded!)
+
+---
+
+#### Option 2: `MicroMutableOpResolver` (Optimal for Embedded)
+
+**What it does:** You manually register ONLY the operations your model uses.
+
+**Code:**
+```cpp
+#include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
+
+// Template parameter = max number of ops
+tflite::MicroMutableOpResolver<5> resolver;  // ← Reserve space for 5 ops
+
+// Manually add each operation your model uses
+resolver.AddConv2D();
+resolver.AddMaxPool2D();
+resolver.AddReshape();
+resolver.AddFullyConnected();
+resolver.AddSoftmax();
+```
+
+**Pros:**
+- ✅ Minimal binary size (~20-50 KB depending on ops)
+- ✅ Fits on small microcontrollers ✅
+- ✅ No wasted code
+
+**Cons:**
+- ❌ Requires knowing which ops your model uses
+- ❌ More manual work (5-10 lines of code)
+- ❌ Error-prone (forget an op → runtime error)
+
+**When to use:**
+- **Production embedded systems** (always!)
+- **Flash-constrained devices** (your 256 KB chip!)
+- **Battery-powered devices** (smaller code = less energy)
+
+---
+
+#### Comparison Table
+
+| Feature | `AllOpsResolver` | `MicroMutableOpResolver<N>` |
+|---------|------------------|----------------------------|
+| **Binary size** | ~200-300 KB | ~20-50 KB (your ops only) |
+| **Setup effort** | 1 line | 5-10 lines |
+| **Flexibility** | Works with any model | Must know your ops |
+| **Embedded-friendly** | ❌ Too big | ✅ Perfect |
+| **Development speed** | ✅ Fastest | Slower |
+| **Production use** | ❌ Avoid | ✅ Recommended |
+
+---
+
+#### Your Model — Which Ops Do You Need?
+
+**Your model architecture:**
+```
+Input(50,3) → Conv1D(8,k=3) → MaxPooling1D(2) → Flatten → Dense(16) → Dense(2)
+```
+
+**Operations in the `.tflite` file:**
+1. **CONV_2D** (Conv1D is implemented as Conv2D in TFLite)
+2. **MAX_POOL_2D** (MaxPooling1D → MaxPool2D)
+3. **RESHAPE** (Flatten → Reshape)
+4. **FULLY_CONNECTED** (Dense → FullyConnected)
+5. **SOFTMAX** (if you used softmax activation)
+
+**Optimal resolver for YOUR model:**
+```cpp
+tflite::MicroMutableOpResolver<5> resolver;  // 5 operations
+
+resolver.AddConv2D();          // Conv1D layer
+resolver.AddMaxPool2D();       // MaxPooling1D layer
+resolver.AddReshape();         // Flatten layer
+resolver.AddFullyConnected();  // Dense(16) layer
+resolver.AddFullyConnected();  // Dense(2) layer ← Wait, only add once!
+```
+
+**Important:** `AddFullyConnected()` registers the **operation type**, not individual layers! Two Dense layers = one `AddFullyConnected()` call!
+
+**Corrected:**
+```cpp
+tflite::MicroMutableOpResolver<4> resolver;  // Actually 4 unique ops!
+
+resolver.AddConv2D();          // For Conv1D
+resolver.AddMaxPool2D();       // For MaxPooling1D
+resolver.AddReshape();         // For Flatten
+resolver.AddFullyConnected();  // For BOTH Dense layers
+```
+
+---
+
+<a name="43-finding-which-ops-your-model-uses"></a>
+### 4.3 Finding Which Ops Your Model Uses
+
+**How do you know which operations to register?**
+
+---
+
+#### Method 1: Use `netron` (Visual Inspector)
+
+**Tool:** [https://netron.app/](https://netron.app/)
+
+**Steps:**
+1. Open `magic_wand_model.tflite` in Netron
+2. Click on each layer
+3. Look for "type" field
+
+**Example for your model:**
+```
+Layer 0: serving_default_input:0
+  Type: Placeholder (no op needed)
+
+Layer 1: conv1d/Relu:0
+  Type: CONV_2D  ← Add resolver.AddConv2D()
+
+Layer 2: max_pooling1d/MaxPool:0
+  Type: MAX_POOL_2D  ← Add resolver.AddMaxPool2D()
+
+Layer 3: flatten/Reshape:0
+  Type: RESHAPE  ← Add resolver.AddReshape()
+
+Layer 4: dense/Relu:0
+  Type: FULLY_CONNECTED  ← Add resolver.AddFullyConnected()
+
+Layer 5: dense_1/MatMul:0
+  Type: FULLY_CONNECTED  (already added above!)
+```
+
+---
+
+#### Method 2: Parse with Python Script
+
+**Use TensorFlow Lite's Python API:**
+
+```python
+import tensorflow as tf
+
+# Load model
+interpreter = tf.lite.Interpreter(model_path="magic_wand_model.tflite")
+interpreter.allocate_tensors()
+
+# Get operation details
+ops = []
+for op_details in interpreter.get_tensor_details():
+    ops.append(op_details['name'])
+
+# Get unique operations
+unique_ops = set()
+for i in range(len(interpreter.get_tensor_details())):
+    # This method varies by TFLite version
+    pass
+
+print("Operations needed:", unique_ops)
+```
+
+**Better script (checks operators, not tensors):**
+
+```python
+import tensorflow as tf
+
+interpreter = tf.lite.Interpreter(model_path="magic_wand_model.tflite")
+model = interpreter._get_ops_details()  # Internal API
+
+unique_ops = set()
+for op in model:
+    op_name = op['op_name']
+    unique_ops.add(op_name)
+    print(f"Operation: {op_name}")
+
+print("\nSummary:")
+print("Unique operations:", unique_ops)
+print("\nCode to add:")
+for op in sorted(unique_ops):
+    print(f"resolver.Add{op}();")
+```
+
+---
+
+#### Method 3: Trial and Error (Let It Fail)
+
+**The pragmatic approach:**
+
+**Step 1:** Start with an empty resolver
+```cpp
+tflite::MicroMutableOpResolver<10> resolver;  // Over-allocate
+// Don't add anything yet!
+```
+
+**Step 2:** Run your code
+```
+ERROR: Didn't find op for builtin opcode 'CONV_2D' version '1'
+```
+
+**Step 3:** Add the missing op
+```cpp
+resolver.AddConv2D();  // ← Add this
+```
+
+**Step 4:** Run again
+```
+ERROR: Didn't find op for builtin opcode 'MAX_POOL_2D' version '1'
+```
+
+**Step 5:** Add that too
+```cpp
+resolver.AddMaxPool2D();  // ← Add this
+```
+
+**Repeat until it works!** ✅
+
+---
+
+#### Method 4: Check Example Code (TFLite Micro Repository)
+
+**TensorFlow Lite Micro has example models:**
+
+```bash
+# Clone TFLite Micro repo
+git clone https://github.com/tensorflow/tflite-micro.git
+
+# Look at examples
+cd tflite-micro/tensorflow/lite/micro/examples/
+
+# For gesture recognition:
+cat magic_wand/main_functions.cc
+```
+
+**You'll find lines like:**
+```cpp
+static tflite::MicroMutableOpResolver<5> micro_op_resolver;
+micro_op_resolver.AddConv2D();
+micro_op_resolver.AddMaxPool2D();
+micro_op_resolver.AddReshape();
+micro_op_resolver.AddFullyConnected();
+micro_op_resolver.AddSoftmax();
+```
+
+**Adapt to your model!**
+
+---
+
+<a name="44-registering-only-what-you-need-code-size-optimization"></a>
+### 4.4 Registering Only What You Need (Code Size Optimization)
+
+**Why code size matters in embedded systems:**
+
+```
+Your Microcontroller:
+┌──────────────────────────────┐
+│ Flash ROM: 256 KB total      │
+│ ├─ Your code: ??? KB         │
+│ ├─ TFLite Micro: ??? KB      │
+│ ├─ Model weights: 3.2 KB     │
+│ └─ Other libraries: ??? KB   │
+└──────────────────────────────┘
+
+Goal: Fit everything in 256 KB!
+```
+
+**Binary size breakdown:**
+
+| Component | AllOpsResolver | MicroMutableOpResolver (your model) |
+|-----------|----------------|-------------------------------------|
+| TFLite Micro core | ~50 KB | ~50 KB |
+| **Operations** | **~200 KB** (100+ ops) | **~20 KB** (4 ops) |
+| Your code | ~10 KB | ~10 KB |
+| Model (Flash) | 3.2 KB | 3.2 KB |
+| **TOTAL** | **~263 KB** ❌ | **~83 KB** ✅ |
+
+**Result:** `AllOpsResolver` doesn't fit! `MicroMutableOpResolver` has room to spare! 🎉
+
+---
+
+#### How to Minimize Binary Size
+
+**Tip 1: Use exact op count**
+```cpp
+// ❌ Wasteful (reserves space for unused ops)
+tflite::MicroMutableOpResolver<100> resolver;
+resolver.AddConv2D();
+resolver.AddMaxPool2D();
+resolver.AddReshape();
+resolver.AddFullyConnected();
+// 96 slots wasted!
+
+// ✅ Optimal (exact count)
+tflite::MicroMutableOpResolver<4> resolver;
+resolver.AddConv2D();
+resolver.AddMaxPool2D();
+resolver.AddReshape();
+resolver.AddFullyConnected();
+// Perfect fit!
+```
+
+**Tip 2: Avoid duplicate registrations**
+```cpp
+// ❌ Wrong (registers same op twice)
+resolver.AddFullyConnected();  // For Dense(16)
+resolver.AddFullyConnected();  // For Dense(2) ← Redundant!
+
+// ✅ Right (register op type once)
+resolver.AddFullyConnected();  // Handles ALL Dense layers
+```
+
+**Tip 3: Check if your model uses ReLU/Softmax implicitly**
+
+Some operations have **fused activations**:
+
+```cpp
+// Your Keras model:
+Dense(16, activation='relu')  // ← ReLU is INSIDE FullyConnected!
+Dense(2, activation='softmax') // ← Softmax might be separate!
+
+// TFLite might convert this to:
+// Op 1: FULLY_CONNECTED (with ReLU fused)
+// Op 2: FULLY_CONNECTED
+// Op 3: SOFTMAX (separate!)
+```
+
+**Check your model to know for sure!** (Use Netron or trial-and-error)
+
+---
+
+<a name="45-common-operators-and-their-registration"></a>
+### 4.5 Common Operators and Their Registration
+
+**Quick reference for common layers:**
+
+| **Keras Layer** | **TFLite Op** | **Resolver Method** |
+|----------------|---------------|---------------------|
+| `Conv1D(...)` | `CONV_2D` | `resolver.AddConv2D()` |
+| `Conv2D(...)` | `CONV_2D` | `resolver.AddConv2D()` |
+| `DepthwiseConv2D(...)` | `DEPTHWISE_CONV_2D` | `resolver.AddDepthwiseConv2D()` |
+| `MaxPooling1D(...)` | `MAX_POOL_2D` | `resolver.AddMaxPool2D()` |
+| `MaxPooling2D(...)` | `MAX_POOL_2D` | `resolver.AddMaxPool2D()` |
+| `AveragePooling2D(...)` | `AVERAGE_POOL_2D` | `resolver.AddAveragePool2D()` |
+| `Flatten()` | `RESHAPE` | `resolver.AddReshape()` |
+| `Reshape(...)` | `RESHAPE` | `resolver.AddReshape()` |
+| `Dense(...)` | `FULLY_CONNECTED` | `resolver.AddFullyConnected()` |
+| `Activation('relu')` | (fused or `RELU`) | `resolver.AddRelu()` |
+| `Activation('softmax')` | `SOFTMAX` | `resolver.AddSoftmax()` |
+| `BatchNormalization()` | (often fused) | (usually not needed!) |
+| `Dropout()` | (removed during conversion) | (not needed!) |
+| `LSTM(...)` | `UNIDIRECTIONAL_SEQUENCE_LSTM` | `resolver.AddUnidirectionalSequenceLSTM()` |
+| `Add()` (layer) | `ADD` | `resolver.AddAdd()` |
+| `Concatenate()` | `CONCATENATION` | `resolver.AddConcatenation()` |
+
+**Important notes:**
+
+1. **Conv1D → CONV_2D:** TFLite converts Conv1D to Conv2D internally!
+2. **Fused operations:** ReLU is often fused into Conv/Dense (no separate registration needed!)
+3. **Dropout removed:** Dropout is training-only, removed during `.tflite` conversion
+4. **BatchNorm fused:** Often fused into Conv/Dense weights during quantization
+
+---
+
+#### Complete Example for YOUR Model
+
+```cpp
+#include "tensorflow/lite/micro/micro_interpreter.h"
+#include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
+#include "tensorflow/lite/micro/system_setup.h"
+#include "tensorflow/lite/schema/schema_generated.h"
+
+// Your model
+#include "magic_wand_model_data.h"
+
+// Arena
+alignas(16) uint8_t tensor_arena[4000];
+
+void setup() {
+    // Load model
+    const tflite::Model* model = tflite::GetModel(magic_wand_model_data);
+    
+    // Create resolver with exactly 4 ops
+    static tflite::MicroMutableOpResolver<4> resolver;
+    
+    // Register operations (order doesn't matter!)
+    resolver.AddConv2D();          // For Conv1D layer
+    resolver.AddMaxPool2D();       // For MaxPooling1D layer
+    resolver.AddReshape();         // For Flatten layer
+    resolver.AddFullyConnected();  // For Dense(16) and Dense(2)
+    
+    // Build interpreter
+    static tflite::MicroInterpreter interpreter(
+        model, resolver, tensor_arena, sizeof(tensor_arena));
+    
+    // Allocate tensors
+    if (interpreter.AllocateTensors() != kTfLiteOk) {
+        printf("AllocateTensors() failed!\n");
+        return;
+    }
+    
+    printf("✅ Model initialized successfully!\n");
+}
+```
+
+---
+
+<a name="46-troubleshooting-unsupported-op-errors"></a>
+### 4.6 Troubleshooting "Unsupported Op" Errors
+
+---
+
+#### Error 1: "Didn't find op for builtin opcode"
+
+**Full error message:**
+```
+ERROR: Didn't find op for builtin opcode 'CONV_2D' version '1'
+```
+
+**Cause:** You forgot to register `CONV_2D`.
+
+**Fix:**
+```cpp
+resolver.AddConv2D();  // ← Add this line
+```
+
+---
+
+#### Error 2: "Node ... needs X inputs but Y were provided"
+
+**Cause:** Operation registered but **version mismatch**.
+
+**Example:**
+```
+ERROR: CONV_2D version 2 requested, but only version 1 registered
+```
+
+**Fix:** TFLite Micro auto-registers the latest version, so this is rare. If it happens:
+
+```cpp
+// Most ops have only one version
+resolver.AddConv2D();  // ← Automatically uses latest version
+
+// If you need a specific version (rare):
+// Check TFLite Micro docs for AddConv2D(version) signature
+```
+
+---
+
+#### Error 3: "Failed to allocate tensors" after adding ops
+
+**Cause:** Operations registered, but arena too small for operator scratch buffers.
+
+**Example:**
+```
+ERROR: Tensor arena too small.
+Required: 5248 bytes (was 4000)
+```
+
+**Fix:** Increase arena size!
+
+```cpp
+// Before:
+uint8_t tensor_arena[4000];
+
+// After:
+uint8_t tensor_arena[6000];  // ← Increase
+```
+
+---
+
+#### Error 4: Wrong resolver size
+
+**Error message:**
+```
+ERROR: Tried to add op 5 but resolver only has space for 4
+```
+
+**Cause:**
+```cpp
+tflite::MicroMutableOpResolver<4> resolver;  // ← Only 4 slots
+resolver.AddConv2D();
+resolver.AddMaxPool2D();
+resolver.AddReshape();
+resolver.AddFullyConnected();
+resolver.AddSoftmax();  // ❌ 5th op, but only 4 slots!
+```
+
+**Fix:** Increase template parameter:
+```cpp
+tflite::MicroMutableOpResolver<5> resolver;  // ← 5 slots
+```
+
+---
+
+#### Debugging Strategy
+
+**Step 1: List all operations in your model**
+```python
+# Python script
+import tensorflow as tf
+
+interpreter = tf.lite.Interpreter(model_path="model.tflite")
+ops = set()
+
+# Get all operators (internal API, may vary)
+import flatbuffers
+from tensorflow.lite.python import schema_py_generated as schema_fb
+
+with open("model.tflite", "rb") as f:
+    buf = bytearray(f.read())
+model = schema_fb.Model.GetRootAsModel(buf, 0)
+
+for i in range(model.OperatorCodesLength()):
+    opcode = model.OperatorCodes(i)
+    builtin_code = opcode.BuiltinCode()
+    print(f"Op {i}: {builtin_code}")
+```
+
+**Step 2: Map TFLite ops to resolver methods**
+
+Use the table from Section 4.5!
+
+**Step 3: Test incrementally**
+
+```cpp
+// Add one op at a time
+resolver.AddConv2D();
+// Test → works? Add next:
+resolver.AddMaxPool2D();
+// Test → works? Add next:
+resolver.AddReshape();
+// ...
+```
+
+---
+
+### ✅ Quick Check — OpResolver Edition
+
+**Q1:** Why not just use `AllOpsResolver` for everything?
+
+<details>
+<summary>Click for answer</summary>
+
+**Binary size!**
+
+```
+AllOpsResolver: ~250 KB (all 100+ operations)
+Your chip: 256 KB Flash total
+
+Result: Doesn't fit! ❌
+```
+
+**Also wastes RAM** (operation lookup tables take space).
+
+**Best practice:** Use `MicroMutableOpResolver` in production.
+
+</details>
+
+**Q2:** Your model has two `Dense` layers. Do you call `AddFullyConnected()` twice?
+
+<details>
+<summary>Click for answer</summary>
+
+**NO! ❌**
+
+```cpp
+// ❌ Wrong:
+resolver.AddFullyConnected();  // For Dense(16)
+resolver.AddFullyConnected();  // For Dense(2) ← Redundant!
+
+// ✅ Right:
+resolver.AddFullyConnected();  // Handles ALL Dense layers
+```
+
+**Why?** You're registering the **operation type**, not individual layers!
+
+One `AddFullyConnected()` = all Dense layers use the same implementation.
+
+</details>
+
+**Q3:** What happens if you forget to register an operation?
+
+<details>
+<summary>Click for answer</summary>
+
+**Runtime error during model loading:**
+
+```
+ERROR: Didn't find op for builtin opcode 'MAX_POOL_2D' version '1'
+```
+
+**The interpreter can't find the C++ code to execute that operation!**
+
+**Fix:** Add the missing operation:
+```cpp
+resolver.AddMaxPool2D();  // ← Register MaxPool
+```
+
+</details>
+
+**Q4:** Can you register ops in any order?
+
+<details>
+<summary>Click for answer</summary>
+
+**YES! ✅**
+
+```cpp
+// Both are equivalent:
+resolver.AddConv2D();
+resolver.AddMaxPool2D();
+resolver.AddReshape();
+resolver.AddFullyConnected();
+
+// vs
+resolver.AddFullyConnected();
+resolver.AddReshape();
+resolver.AddMaxPool2D();
+resolver.AddConv2D();
+```
+
+**Order doesn't matter!** The resolver is just a lookup table.
+
+</details>
+
+---
+
+**🎉 Section 4 Complete!**
+
+You now understand:
+- ✅ What an OpResolver is (4.1)
+- ✅ AllOpsResolver vs MicroMutableOpResolver (4.2)
+- ✅ How to find which ops your model uses (4.3)
+- ✅ Code size optimization (4.4)
+- ✅ Common operations reference (4.5)
+- ✅ Troubleshooting op errors (4.6)
+
+**Next up:** Section 5 — Building the Interpreter! 🚀
 
 ---
 
@@ -4920,9 +6594,9 @@ Track your progress through Phase 3:
 
 - [x] **Section 1: Introduction to TFLite Micro** ✅ EXPLAINED
 - [x] **Section 2: Setting Up Your First TFLite Micro Project** ✅ EXPLAINED  
-- [x] **Section 3: The Tensor Arena — Memory Management** ✅ EXPLAINED (3.1-3.4 complete)
-- [ ] **Section 4: The Op Resolver — Registering Operations** ⏭️ Next
-- [ ] **Section 5: Building the Interpreter** ⏭️ Coming soon
+- [x] **Section 3: The Tensor Arena — Memory Management** ✅ EXPLAINED
+- [x] **Section 4: The Op Resolver — Registering Operations** ✅ EXPLAINED
+- [ ] **Section 5: Building the Interpreter** ⏭️ Next
 - [ ] **Section 6: Preparing Input Data**
 - [ ] **Section 7: Running Inference**
 - [ ] **Section 8: Reading Output Data**
