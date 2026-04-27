@@ -3033,7 +3033,7 @@ alignas(16) extern const unsigned char data[];
 **What You Learned:**
 
 1. **Project Structure (2.1):**
-   - Phase_2 contains your model as C code
+   - Phase_2 contains your model as C codee
    - Phase_3 is where you build the inference program
    - TFLite Micro library lives in `Phase_3/tensorflow_lite/`
 
@@ -6353,8 +6353,8 @@ void setup() {
 
 ---
 
-<a name="455-build-environment-setup-guide"></a>
-### 4.5.5 Build Environment Setup Guide (Windows — MSYS2 + Official TFLM Makefile)
+<a name="451-build-environment-setup-guide"></a>
+### 4.5.1 Build Environment Setup Guide (Windows — MSYS2 + Official TFLM Makefile)
 
 > **Why this section exists:** TFLite Micro's primary build systems are Bazel and Make.
 > CMake is **not** officially supported. On Windows, the cleanest path is
@@ -6442,8 +6442,8 @@ Then select "MSYS2 UCRT64" from the terminal dropdown to build directly in VS Co
 
 ---
 
-<a name="456-why-make-not-cmake"></a>
-### 4.5.6 Why We Use Make Instead of CMake
+<a name="452-why-make-not-cmake"></a>
+### 4.5.2 Why We Use Make Instead of CMake
 
 You might wonder: "CMake is the standard for C/C++ projects — why aren't we using it?"
 
@@ -6486,8 +6486,8 @@ Make reads the `Makefile` and runs compiler commands directly. No intermediate s
 
 ---
 
-<a name="457-understanding-the-makefile"></a>
-### 4.5.7 Understanding the Makefile
+<a name="453-understanding-the-makefile"></a>
+### 4.5.3 Understanding the Makefile
 
 Our `Phase_3/Makefile` is short (~85 lines) but worth understanding. Here's a
 walkthrough so you can read and modify it confidently.
