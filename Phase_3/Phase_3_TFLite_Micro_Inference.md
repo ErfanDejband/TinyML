@@ -6482,7 +6482,7 @@ With **Make**, it's direct:
 # One step: compile directly
 make run
 ```
-Make reads the `Makefile` and runs compiler commands directly. No intermediate step.
+Make reads the `Makefile` and runs compiler commands directly.. No intermediate step.
 
 ---
 
