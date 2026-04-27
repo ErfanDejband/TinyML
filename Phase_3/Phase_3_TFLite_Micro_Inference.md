@@ -3033,7 +3033,7 @@ alignas(16) extern const unsigned char data[];
 **What You Learned:**
 
 1. **Project Structure (2.1):**
-   - Phase_2 contains your model as C code
+   - Phase_2 contains your model as C codee
    - Phase_3 is where you build the inference program
    - TFLite Micro library lives in `Phase_3/tensorflow_lite/`
 
@@ -6349,6 +6349,261 @@ void setup() {
     
     printf("✅ Model initialized successfully!\n");
 }
+```
+
+---
+
+<a name="451-build-environment-setup-guide"></a>
+### 4.5.1 Build Environment Setup Guide (Windows — MSYS2 + Official TFLM Makefile)
+
+> **Why this section exists:** TFLite Micro's primary build systems are Bazel and Make.
+> CMake is **not** officially supported. On Windows, the cleanest path is
+> MSYS2 UCRT64 + the official TFLM Makefile. This section documents the exact
+> setup so you (or anyone cloning this repo) can reproduce it.
+
+#### Step 1 — Install MSYS2
+
+Download from https://www.msys2.org/ and install (e.g. `C:\Users\<you>\msys64`).
+Open the **UCRT64** terminal (not MSYS or MINGW64).
+
+#### Step 2 — Install required MSYS2 packages
+
+```bash
+pacman -S --noconfirm \
+  mingw-w64-ucrt-x86_64-gcc \
+  mingw-w64-ucrt-x86_64-python \
+  mingw-w64-ucrt-x86_64-python-numpy \
+  mingw-w64-ucrt-x86_64-python-pillow \
+  make git curl unzip patch diffutils
+```
+
+Verify:
+```bash
+gcc --version    # GCC 13+ expected
+python --version # Python 3.11+ expected
+make --version
+```
+
+#### Step 3 — Clone tflite-micro with LF line endings
+
+The official Makefile uses bash scripts. On Windows you **must** keep LF endings:
+```bash
+cd /c/Users/<you>/DevRepositories/SHL/My_Project/Old_PROJECT/TinyML
+git clone -c core.autocrlf=false https://github.com/tensorflow/tflite-micro.git
+```
+
+> ⚠️ If you already cloned with CRLF, delete and re-clone with the flag above.
+
+#### Step 4 — Build and run
+
+```bash
+cd Phase_3
+make run
+```
+
+First build takes 5–15 min (downloads deps + compiles 200+ files).
+Subsequent builds are fast (only recompiles changed files).
+
+Expected output:
+```
+Model loaded: 7848 bytes
+Model initialized successfully!
+Inference complete!
+```
+
+#### Step 5 — VS Code integration (optional)
+
+Add an MSYS2 UCRT64 terminal profile to `.vscode/settings.json`:
+```json
+{
+    "terminal.integrated.profiles.windows": {
+        "MSYS2 UCRT64": {
+            "path": "C:\\Users\\<you>\\msys64\\usr\\bin\\bash.exe",
+            "args": ["--login", "-i"],
+            "env": {
+                "MSYSTEM": "UCRT64",
+                "CHERE_INVOKING": "1"
+            }
+        }
+    }
+}
+```
+
+Then select "MSYS2 UCRT64" from the terminal dropdown to build directly in VS Code.
+
+#### Quick reference
+
+| Command | What it does |
+|---------|--------------|
+| `make` | Build TFLM lib + compile main |
+| `make run` | Build + run |
+| `make clean` | Remove Phase_3 build artifacts |
+| `make clean-all` | Also clean TFLM library |
+
+---
+
+<a name="452-why-make-not-cmake"></a>
+### 4.5.2 Why We Use Make Instead of CMake
+
+You might wonder: "CMake is the standard for C/C++ projects — why aren't we using it?"
+
+**Short answer:** TFLite Micro does **not** support CMake. We tried it. It was painful.
+
+**The full story:**
+
+| Approach | What happened |
+|----------|---------------|
+| **CMake + Ninja** | We manually listed 44+ `.cc` files, cloned 4 dependencies by hand, and hit a [UTF-8 BOM bug](https://gitlab.kitware.com/cmake/cmake/-/issues/25400) where Ninja generates response files with invisible bytes that corrupt the linker. Required a PowerShell workaround script. |
+| **Bazel** | TFLite Micro's *primary* build system. But on Windows it requires Visual Studio / MSVC Build Tools — which may not be available in corporate environments. |
+| **Official Make** | The officially supported alternative. Auto-downloads all dependencies, auto-discovers source files, and produces a clean static library. Needs MSYS2 on Windows, but works reliably. |
+
+**Key insight:** When a project provides an official build system, use it.
+Fighting against it (e.g. writing your own CMakeLists.txt for a Bazel-native project)
+creates fragile builds that break when the upstream project changes.
+
+> **Analogy:** Imagine a restaurant has a menu. CMake is like walking into the kitchen
+> and trying to cook your own meal with their ingredients. The official Makefile is
+> like ordering from the menu — the chef knows what goes together.
+
+#### How "make" differs from "cmake" conceptually
+
+With **CMake**, building is a two-step process:
+```bash
+# Step 1: Generate build files (Ninja/Make/VS project files)
+cmake -G Ninja -B build
+
+# Step 2: Actually compile
+cmake --build build
+```
+CMake is a *build system generator* — it creates files for another tool to use.
+
+With **Make**, it's direct:
+```bash
+# One step: compile directly
+make run
+```
+Make reads the `Makefile` and runs compiler commands directly.. No intermediate step.
+
+---
+
+<a name="453-understanding-the-makefile"></a>
+### 4.5.3 Understanding the Makefile
+
+Our `Phase_3/Makefile` is short (~85 lines) but worth understanding. Here's a
+walkthrough so you can read and modify it confidently.
+
+#### Variables
+
+```makefile
+CXX      := g++           # C++ compiler
+CC       := gcc            # C compiler
+CXXFLAGS := -std=c++17     # Flags passed to g++ on every compile
+LDFLAGS  := -lm            # Flags passed to the linker (-lm = link math library)
+```
+
+`:=` means "set this variable right now" (immediate assignment).
+Think of it like Python's `CXX = "g++"`.
+
+The `-I` flags tell the compiler where to find header files:
+```makefile
+INCLUDES := \
+  -I$(TFLM_ROOT) \                              # tensorflow/lite/micro/*.h
+  -I$(DOWNLOADS_DIR)/flatbuffers/include \       # flatbuffers/*.h
+  -I$(DOWNLOADS_DIR)/gemmlowp \                  # fixedpoint/*.h
+  -I$(DOWNLOADS_DIR)/ruy                         # ruy/*.h
+```
+
+#### Targets and rules
+
+A Makefile rule looks like this:
+```
+target: dependencies
+	command
+```
+
+"To build `target`, first ensure `dependencies` are up-to-date, then run `command`."
+
+```makefile
+main.o: main.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+```
+
+This says: "To create `main.o`, you need `main.cpp`. Compile it with g++."
+
+#### Automatic variables (the cryptic `$<` and `$@`)
+
+These are shortcuts — like Python's `self`, but for build rules:
+
+| Symbol | Meaning | In our example |
+|--------|---------|----------------|
+| `$@` | The **target** (what we're building) | `main.o` |
+| `$<` | The **first dependency** (first input file) | `main.cpp` |
+| `$^` | **All dependencies** | `main.cpp` (same here, but useful when there are multiple) |
+
+So `$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@` expands to:
+```bash
+g++ -std=c++17 -DTF_LITE_STATIC_MEMORY -DTF_LITE_USE_CTIME -I../tflite-micro ... -c main.cpp -o main.o
+```
+
+> **Analogy:** `$@` is "me" (the thing being built), `$<` is "my main ingredient".
+
+#### .PHONY — "these aren't real files"
+
+```makefile
+.PHONY: all run clean clean-all tflm-lib
+```
+
+Normally Make checks: "does a file called `clean` exist? If yes, it's up-to-date, skip it."
+`.PHONY` says: "these are *commands*, not file names — always run them."
+
+Without `.PHONY`, if you accidentally had a file named `clean` in your directory,
+`make clean` would say "nothing to do" instead of actually cleaning.
+
+#### $(MAKE) and -C — calling another Makefile
+
+```makefile
+$(MAKE) -C $(TFLM_ROOT) -f tensorflow/lite/micro/tools/make/Makefile microlite
+```
+
+| Part | Meaning |
+|------|---------|
+| `$(MAKE)` | Runs `make` itself (recursive make) |
+| `-C $(TFLM_ROOT)` | Change to `../tflite-micro/` directory first |
+| `-f ...Makefile` | Use this specific Makefile (not the default) |
+| `microlite` | Build the `microlite` target (the static library) |
+
+This is how our small Makefile delegates the heavy lifting to TFLM's official 500+ line Makefile.
+
+#### $(eval ...) and $(wildcard ...) — dynamic paths
+
+```makefile
+$(TARGET_BIN): $(OBJS)
+	$(eval TFLM_GEN_DIR := $(wildcard $(TFLM_ROOT)/gen/*/lib))
+	$(eval TFLM_LIB := $(TFLM_GEN_DIR)/libtensorflow-microlite.a)
+```
+
+The official TFLM Makefile generates output in a folder named after your OS/arch:
+`tflite-micro/gen/windows_x86_64_default_gcc/lib/`
+
+Since we don't want to hardcode that long name, `$(wildcard .../gen/*/lib)` finds it
+automatically. `$(eval ...)` updates the variable at link time (because the folder
+doesn't exist until after the library is built).
+
+#### Full build flow
+
+```
+make run
+  ├─ all (depends on: tflm-lib, main)
+  │   ├─ tflm-lib
+  │   │   └─ calls TFLM's official Makefile → builds libtensorflow-microlite.a
+  │   │      (first run: downloads flatbuffers, gemmlowp, ruy, pigweed, kissfft)
+  │   │
+  │   └─ main (depends on: main.o, magic_wand_model_data.o)
+  │       ├─ main.o ← compile main.cpp
+  │       ├─ magic_wand_model_data.o ← compile model data .c file
+  │       └─ link everything + TFLM library → main.exe
+  │
+  └─ run: execute ./main
 ```
 
 ---
